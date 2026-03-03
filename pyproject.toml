@@ -29,6 +29,7 @@ dependencies = [
 [project.scripts]
 setup = "src.cli:setup"
 collect = "src.cli:collect"
+enrich = "src.cli:enrich"
 status = "src.cli:status"
 stop = "src.cli:stop"
 serve = "src.cli:serve"

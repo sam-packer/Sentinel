@@ -101,6 +101,86 @@ class SentinelDB:
             cur.execute("SELECT 1 FROM raw_claims WHERE tweet_id = %s", (tweet_id,))
             return cur.fetchone() is not None
 
+    def get_existing_tweet_ids(self, tweet_ids: list[int]) -> set[int]:
+        """Return the subset of tweet_ids that already exist in raw_claims."""
+        if not tweet_ids:
+            return set()
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT tweet_id FROM raw_claims WHERE tweet_id = ANY(%s)",
+                (tweet_ids,),
+            )
+            return {row[0] for row in cur.fetchall()}
+
+    def get_raw_claims(
+        self,
+        tickers: list[str] | None = None,
+        since: "datetime | None" = None,
+        until: "datetime | None" = None,
+        unlabeled_only: bool = False,
+    ) -> list[RawClaim]:
+        """Fetch raw claims from the database for re-enrichment.
+
+        Args:
+            tickers: Only return claims for these tickers. None = all.
+            since: Only return claims created after this time.
+            until: Only return claims created before this time.
+            unlabeled_only: If True, only return claims without a labeled_claims row.
+        """
+        conn = self._get_conn()
+        query = "SELECT * FROM raw_claims"
+        conditions: list[str] = []
+        params: list = []
+
+        if unlabeled_only:
+            conditions.append(
+                "tweet_id NOT IN (SELECT tweet_id FROM labeled_claims)"
+            )
+        if tickers:
+            conditions.append("ticker = ANY(%s)")
+            params.append(tickers)
+        if since:
+            conditions.append("created_at >= %s")
+            params.append(since)
+        if until:
+            conditions.append("created_at <= %s")
+            params.append(until)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY created_at DESC"
+
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+
+        claims = []
+        for row in rows:
+            d = dict(zip(columns, row))
+            headlines = d.get("news_headlines", [])
+            if isinstance(headlines, str):
+                import json as _json
+                headlines = _json.loads(headlines)
+            claims.append(RawClaim(
+                tweet_id=d["tweet_id"],
+                text=d["text"],
+                username=d["username"],
+                created_at=d["created_at"],
+                likes=d.get("likes", 0),
+                retweets=d.get("retweets", 0),
+                ticker=d["ticker"],
+                company_name=d["company_name"],
+                price_at_tweet=d.get("price_at_tweet"),
+                price_24h_later=d.get("price_24h_later"),
+                price_change_pct=d.get("price_change_pct"),
+                news_headlines=headlines,
+                has_catalyst=d.get("has_catalyst", False),
+                catalyst_type=d.get("catalyst_type"),
+            ))
+        return claims
+
     def insert_raw_claim(self, claim: RawClaim) -> None:
         """Insert a raw claim, skipping duplicates."""
         conn = self._get_conn()

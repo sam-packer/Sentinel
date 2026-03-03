@@ -198,7 +198,6 @@ async def run_collection(
                 f"Proceeding with {len(mature_claims)} mature tweets."
             )
         claims = mature_claims
-        status.scraped = len(claims)
 
         pf = PriceFetcher()
 
@@ -207,6 +206,19 @@ async def run_collection(
             db = SentinelDB(database_url)
             db.connect()
             db.init_schema()
+
+        # Skip tweets already in the database
+        if db:
+            all_ids = [c.tweet_id for c in claims]
+            existing = db.get_existing_tweet_ids(all_ids)
+            if existing:
+                claims = [c for c in claims if c.tweet_id not in existing]
+                logger.info(
+                    f"Skipped {len(existing)} already-scraped tweets, "
+                    f"{len(claims)} new tweets to enrich"
+                )
+
+        status.scraped = len(claims)
 
         for i, claim in enumerate(claims):
             if shutdown_requested:
@@ -264,3 +276,87 @@ async def run_collection(
         PID_FILE.unlink(missing_ok=True)
         logger.error(f"Collection failed: {e}")
         raise
+
+
+async def run_enrichment(
+    database_url: str,
+    tickers: list[str] | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    unlabeled_only: bool = False,
+) -> None:
+    """Re-enrich existing raw claims without scraping.
+
+    Reads claims from the database, fetches fresh price/news data,
+    re-labels, and updates the database.
+    """
+    from .data.db import SentinelDB
+    from .data.labeler import label_claim
+    from .news_fetcher import classify_catalyst, fetch_news_for_claim
+    from .price_fetcher import PriceFetcher
+
+    db = SentinelDB(database_url)
+    db.connect()
+    db.init_schema()
+
+    claims = db.get_raw_claims(
+        tickers=tickers, since=since, until=until,
+        unlabeled_only=unlabeled_only,
+    )
+
+    if not claims:
+        logger.info("No claims to enrich")
+        db.close()
+        return
+
+    # Filter out tweets too recent for 24h price window
+    now = datetime.now(tz=timezone.utc)
+    min_age = timedelta(hours=25)
+    mature = []
+    skipped = 0
+    for claim in claims:
+        tweet_time = claim.created_at
+        if tweet_time.tzinfo is None:
+            tweet_time = tweet_time.replace(tzinfo=timezone.utc)
+        if now - tweet_time < min_age:
+            skipped += 1
+        else:
+            mature.append(claim)
+
+    if skipped:
+        logger.warning(
+            f"Skipped {skipped} tweets less than 25h old, "
+            f"{len(mature)} to enrich"
+        )
+
+    logger.info(f"Enriching {len(mature)} claims")
+    pf = PriceFetcher()
+    labeled_count = 0
+    failed_count = 0
+
+    for i, claim in enumerate(mature):
+        try:
+            move = pf.get_price_change(claim.ticker, claim.created_at, hours=24)
+            claim.price_at_tweet = move.price_at
+            claim.price_24h_later = move.price_after
+            claim.price_change_pct = move.change_pct
+
+            articles = await fetch_news_for_claim(
+                claim.ticker, claim.company_name, claim.created_at,
+            )
+            claim.news_headlines = [a["title"] for a in articles if a.get("title")]
+            claim.has_catalyst, claim.catalyst_type = classify_catalyst(claim.news_headlines)
+
+            labeled = label_claim(claim)
+            db.insert_labeled_claim(labeled)
+            labeled_count += 1
+
+            if (i + 1) % 25 == 0:
+                logger.info(f"Enriched {i + 1}/{len(mature)}")
+
+        except Exception as e:
+            failed_count += 1
+            logger.warning(f"Failed to enrich claim {claim.tweet_id}: {e}")
+
+    db.close()
+    logger.info(f"Enrichment complete: {labeled_count} labeled, {failed_count} failed")

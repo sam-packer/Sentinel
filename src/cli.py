@@ -7,11 +7,11 @@ Usage:
   uv run setup                        — Initialize DB, sanity check
   uv run collect --n 100              — Scrape and label claims
   uv run collect --n 100 --background — Run collection in background
+  uv run enrich                       — Re-enrich existing claims
+  uv run enrich --unlabeled           — Only enrich claims without labels
   uv run status                       — Check collection progress
   uv run stop                         — Stop background collection
   uv run serve                        — Start API server
-  uv run train                        — Train ML models
-  uv run experiment                   — Run news ablation
 """
 
 import asyncio
@@ -304,6 +304,62 @@ def collect(
         st = read_status()
         if st:
             click.echo(f"Done: {st.labeled} labeled, {st.failed} failed")
+
+
+@click.command()
+@click.option("--tickers", default=None, help="Comma-separated tickers (default: all)")
+@click.option("--since", "since_str", default=None,
+              help="Only enrich claims created after this time. "
+                   "Relative (1h, 30m, 2d) or ISO in ET (2026-03-02T09:30)")
+@click.option("--until", "until_str", default=None,
+              help="Only enrich claims created before this time. "
+                   "Relative (1h, 30m, 2d) or ISO in ET (2026-03-02T09:30)")
+@click.option("--unlabeled", is_flag=True, help="Only enrich claims that haven't been labeled yet")
+def enrich(
+    tickers: str | None,
+    since_str: str | None,
+    until_str: str | None,
+    unlabeled: bool,
+):
+    """Re-enrich existing raw claims with fresh price and news data."""
+    _init()
+
+    if not config.database.url:
+        click.echo("Error: DATABASE_URL not set. Enrich reads from the database.", err=True)
+        sys.exit(1)
+
+    since = _parse_time(since_str) if since_str else None
+    until = _parse_time(until_str) if until_str else None
+
+    if since and until and since >= until:
+        click.echo("Error: --since must be before --until.", err=True)
+        sys.exit(1)
+
+    ticker_list = tickers.split(",") if tickers else None
+
+    from .collector import run_enrichment
+
+    parts = ["Re-enriching"]
+    if unlabeled:
+        parts.append("unlabeled")
+    parts.append("claims")
+    if ticker_list:
+        parts.append(f"for {', '.join(ticker_list)}")
+    if since:
+        parts.append(f"since {_format_time(since)}")
+    if until:
+        parts.append(f"until {_format_time(until)}")
+    click.echo(" ".join(parts))
+
+    asyncio.run(run_enrichment(
+        database_url=config.database.url,
+        tickers=ticker_list,
+        since=since,
+        until=until,
+        unlabeled_only=unlabeled,
+    ))
+
+    click.echo("Done.")
 
 
 @click.command()
