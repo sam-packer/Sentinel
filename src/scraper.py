@@ -122,6 +122,8 @@ class DefenseStockScraper:
         limit: int = 50,
         lang: str = "en",
         timeout: int = 300,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[ScrapedTweet]:
         """Search for tweets matching a query.
 
@@ -130,6 +132,8 @@ class DefenseStockScraper:
             limit: Maximum number of tweets to retrieve.
             lang: Language filter.
             timeout: Maximum time in seconds.
+            since: Only return tweets after this time (inclusive).
+            until: Only return tweets before this time (exclusive).
 
         Returns:
             List of ScrapedTweet objects.
@@ -137,6 +141,16 @@ class DefenseStockScraper:
         api = await self._get_api()
         tweets: list[ScrapedTweet] = []
         search_query = f"{query} lang:{lang}"
+
+        # Add time-based filters using Twitter's since_time:/until_time: operators
+        if since is not None:
+            ts = int(since.timestamp())
+            search_query += f" since_time:{ts}"
+            logger.info(f"Filtering tweets since {since.isoformat()}")
+        if until is not None:
+            ts = int(until.timestamp())
+            search_query += f" until_time:{ts}"
+            logger.info(f"Filtering tweets until {until.isoformat()}")
 
         # Check account availability
         try:
@@ -201,6 +215,8 @@ class DefenseStockScraper:
         tickers: list[str] | None = None,
         limit_per_ticker: int = 50,
         on_ticker_done: callable = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> list[RawClaim]:
         """Scrape tweets about defense stocks and convert to RawClaims.
 
@@ -209,6 +225,8 @@ class DefenseStockScraper:
             limit_per_ticker: Max tweets per ticker.
             on_ticker_done: Optional callback(ticker, claims_found, tickers_done, tickers_total)
                 called after each ticker batch completes.
+            since: Only return tweets after this time.
+            until: Only return tweets before this time.
 
         Returns:
             Deduplicated list of RawClaims.
@@ -216,7 +234,15 @@ class DefenseStockScraper:
         if tickers is None:
             tickers = get_public_tickers()
 
-        logger.info(f"Scraping {len(tickers)} defense tickers, {limit_per_ticker} tweets each")
+        time_desc = ""
+        if since or until:
+            parts = []
+            if since:
+                parts.append(f"since {since.isoformat()}")
+            if until:
+                parts.append(f"until {until.isoformat()}")
+            time_desc = f" ({', '.join(parts)})"
+        logger.info(f"Scraping {len(tickers)} defense tickers, {limit_per_ticker} tweets each{time_desc}")
         all_claims: list[RawClaim] = []
         seen_tweet_ids: set[int] = set()
 
@@ -239,7 +265,8 @@ class DefenseStockScraper:
 
                 for query in queries:
                     results = await self.search_tweets(
-                        query, limit=limit_per_ticker // len(queries)
+                        query, limit=limit_per_ticker // len(queries),
+                        since=since, until=until,
                     )
                     ticker_tweets.extend(results)
 

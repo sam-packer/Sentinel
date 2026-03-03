@@ -100,6 +100,8 @@ async def run_collection(
     n_per_ticker: int,
     ticker_list: list[str],
     database_url: str | None,
+    since: datetime | None = None,
+    until: datetime | None = None,
 ) -> None:
     """Run the full collection pipeline with status tracking."""
     from .data.db import SentinelDB
@@ -161,6 +163,8 @@ async def run_collection(
             tickers=ticker_list,
             limit_per_ticker=n_per_ticker,
             on_ticker_done=_on_ticker_done,
+            since=since,
+            until=until,
         )
         status.scraped = len(claims)
         status.scrape_tweets_found = len(claims)

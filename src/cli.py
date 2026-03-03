@@ -17,14 +17,24 @@ Usage:
 import asyncio
 import logging
 import os
+import re
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
 
 from .config import config
+
+# US Eastern timezone (ET) for market hours
+try:
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+except ImportError:
+    from datetime import tzinfo
+    # Fallback: EST = UTC-5 (ignores DST)
+    ET = timezone(timedelta(hours=-5))
 
 logger = logging.getLogger("sentinel.cli")
 
@@ -113,14 +123,109 @@ def setup():
     click.echo("  uv run serve            # Start API server")
 
 
+def _parse_time(value: str) -> datetime:
+    """Parse a time string into a datetime.
+
+    Supports:
+      - Relative durations: "30m", "1h", "2d", "1w" (subtracted from now)
+      - ISO datetime: "2026-03-02T09:30:00"
+      - Date only: "2026-03-02" (midnight UTC)
+      - "now" keyword
+    """
+    value = value.strip()
+
+    if value.lower() == "now":
+        return datetime.now(timezone.utc)
+
+    # Relative duration: e.g. "30m", "2h", "1d", "1w"
+    match = re.fullmatch(r"(\d+)\s*([mhdw])", value, re.IGNORECASE)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2).lower()
+        delta = {"m": timedelta(minutes=amount), "h": timedelta(hours=amount),
+                 "d": timedelta(days=amount), "w": timedelta(weeks=amount)}[unit]
+        return datetime.now(timezone.utc) - delta
+
+    # ISO datetime or date-only
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(value, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+
+    raise click.BadParameter(
+        f"Cannot parse '{value}'. Use relative (e.g. 1h, 30m, 2d) "
+        f"or ISO format (e.g. 2026-03-02, 2026-03-02T09:30)."
+    )
+
+
 @click.command()
 @click.option("-n", "n_per_ticker", default=50, help="Tweets per ticker")
 @click.option("--tickers", default=None, help="Comma-separated tickers (default: all)")
+@click.option("--since", "since_str", default=None,
+              help="Only scrape tweets after this time. "
+                   "Relative (1h, 30m, 2d) or ISO (2026-03-02T09:30)")
+@click.option("--until", "until_str", default=None,
+              help="Only scrape tweets before this time. "
+                   "Relative (1h, 30m, 2d) or ISO (2026-03-02T09:30)")
+@click.option("--market-open", "market_open_date", default=None,
+              help="Scrape tweets around market open (9:00-10:30 AM ET) on DATE. "
+                   "Use 'today', 'yesterday', or YYYY-MM-DD.")
 @click.option("--background", is_flag=True, help="Run in background")
 @click.option("--_daemonized", is_flag=True, hidden=True)
-def collect(n_per_ticker: int, tickers: str | None, background: bool, _daemonized: bool):
+def collect(
+    n_per_ticker: int,
+    tickers: str | None,
+    since_str: str | None,
+    until_str: str | None,
+    market_open_date: str | None,
+    background: bool,
+    _daemonized: bool,
+):
     """Scrape and label defense stock claims."""
     _init()
+
+    # Parse time window
+    since = None
+    until = None
+
+    if market_open_date and (since_str or until_str):
+        click.echo("Error: --market-open cannot be combined with --since/--until.", err=True)
+        sys.exit(1)
+
+    if market_open_date:
+        # Resolve the date
+        mo = market_open_date.strip().lower()
+        if mo == "today":
+            target = datetime.now(ET).date()
+        elif mo == "yesterday":
+            target = (datetime.now(ET) - timedelta(days=1)).date()
+        else:
+            try:
+                target = datetime.strptime(mo, "%Y-%m-%d").date()
+            except ValueError:
+                click.echo(
+                    f"Error: Cannot parse date '{market_open_date}'. "
+                    "Use 'today', 'yesterday', or YYYY-MM-DD.", err=True
+                )
+                sys.exit(1)
+
+        # Market open window: 9:00 AM - 10:30 AM ET
+        since = datetime(target.year, target.month, target.day, 9, 0, tzinfo=ET)
+        until = datetime(target.year, target.month, target.day, 10, 30, tzinfo=ET)
+        click.echo(f"Market-open mode: {target} 9:00-10:30 AM ET")
+
+    if since_str:
+        since = _parse_time(since_str)
+    if until_str:
+        until = _parse_time(until_str)
+
+    if since and until and since >= until:
+        click.echo("Error: --since must be before --until.", err=True)
+        sys.exit(1)
 
     from .collector import is_running
 
@@ -142,6 +247,12 @@ def collect(n_per_ticker: int, tickers: str | None, background: bool, _daemonize
         cmd = [collect_bin, "-n", str(n_per_ticker), "--_daemonized"]
         if tickers:
             cmd.extend(["--tickers", tickers])
+        if since_str:
+            cmd.extend(["--since", since_str])
+        if until_str:
+            cmd.extend(["--until", until_str])
+        if market_open_date:
+            cmd.extend(["--market-open", market_open_date])
 
         proc = subprocess.Popen(
             cmd,
@@ -161,12 +272,19 @@ def collect(n_per_ticker: int, tickers: str | None, background: bool, _daemonize
     ticker_list = tickers.split(",") if tickers else get_public_tickers()
 
     if not _daemonized:
-        click.echo(f"Collecting claims for {len(ticker_list)} tickers, {n_per_ticker} each")
+        parts = [f"Collecting claims for {len(ticker_list)} tickers, {n_per_ticker} each"]
+        if since:
+            parts.append(f"since {since.isoformat()}")
+        if until:
+            parts.append(f"until {until.isoformat()}")
+        click.echo(" ".join(parts))
 
     asyncio.run(run_collection(
         n_per_ticker=n_per_ticker,
         ticker_list=ticker_list,
         database_url=config.database.url,
+        since=since,
+        until=until,
     ))
 
     if not _daemonized:
