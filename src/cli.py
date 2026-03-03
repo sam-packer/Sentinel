@@ -180,7 +180,7 @@ def status():
     """Check collection progress."""
     _init()
 
-    from .collector import is_running, read_status
+    from .collector import LOG_FILE, is_running, read_status
 
     st = read_status()
     if st is None:
@@ -201,18 +201,33 @@ def status():
         click.echo(f"  Phase:    {st.phase}")
 
         if st.state == "scraping":
-            click.echo(f"  Scraping tweets for {len(st.tickers)} tickers...")
+            pct = (st.tickers_scraped / st.tickers_total * 100) if st.tickers_total > 0 else 0
+            click.echo(f"  Tickers:  {st.tickers_scraped}/{st.tickers_total} ({pct:.0f}%)")
+            click.echo(f"  Tweets:   {st.scrape_tweets_found} found so far")
+            if st.current_ticker:
+                click.echo(f"  Current:  {st.current_ticker}")
         else:
             total = st.scraped
             done = st.enriched
             pct = (done / total * 100) if total > 0 else 0
             click.echo(f"  Progress: {done}/{total} claims enriched ({pct:.0f}%)")
+            if st.current_ticker:
+                click.echo(f"  Current:  {st.current_ticker}")
+            click.echo(f"  Labeled:  {st.labeled}")
+            click.echo(f"  Failed:   {st.failed}")
 
-        if st.current_ticker:
-            click.echo(f"  Current:  {st.current_ticker}")
-        click.echo(f"  Labeled:  {st.labeled}")
-        click.echo(f"  Failed:   {st.failed}")
         click.echo(f"  PID:      {st.pid}")
+
+        # Show recent log output
+        if LOG_FILE.exists():
+            click.echo("")
+            click.echo("Recent log output:")
+            try:
+                lines = LOG_FILE.read_text().splitlines()
+                for line in lines[-10:]:
+                    click.echo(f"  {line}")
+            except Exception:
+                pass
     else:
         click.echo("No collection running.")
         state_label = st.state

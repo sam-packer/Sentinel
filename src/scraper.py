@@ -144,12 +144,21 @@ class DefenseStockScraper:
             active = stats.get("active", 0)
             total = stats.get("total", 0)
             if total > 0 and active == 0:
-                logger.warning("All accounts rate-limited. Increasing timeout.")
+                logger.warning(
+                    f"All {total} accounts are rate-limited. "
+                    "Increasing timeout to allow waiting..."
+                )
                 timeout = max(timeout, 960)
         except Exception as e:
             logger.debug(f"Could not check account availability: {e}")
 
-        logger.info(f"Searching: '{search_query}' (limit: {limit})")
+        if limit > 100:
+            logger.warning(
+                f"High tweet limit ({limit}) may trigger rate limits. "
+                "Consider reducing limit_per_ticker."
+            )
+
+        logger.info(f"Searching: '{search_query}' (limit: {limit}, timeout: {timeout}s)")
         safety_timeout = 1200
 
         try:
@@ -191,12 +200,15 @@ class DefenseStockScraper:
         self,
         tickers: list[str] | None = None,
         limit_per_ticker: int = 50,
+        on_ticker_done: callable = None,
     ) -> list[RawClaim]:
         """Scrape tweets about defense stocks and convert to RawClaims.
 
         Args:
             tickers: Tickers to scrape. Defaults to all public defense tickers.
             limit_per_ticker: Max tweets per ticker.
+            on_ticker_done: Optional callback(ticker, claims_found, tickers_done, tickers_total)
+                called after each ticker batch completes.
 
         Returns:
             Deduplicated list of RawClaims.
@@ -267,6 +279,10 @@ class DefenseStockScraper:
 
             ticker_index += len(batch_tickers)
             batch_number += 1
+
+            if on_ticker_done:
+                last_ticker = batch_tickers[-1]
+                on_ticker_done(last_ticker, len(all_claims), ticker_index, len(tickers))
 
             if ticker_index < len(tickers):
                 await asyncio.sleep(5)

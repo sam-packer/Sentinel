@@ -21,6 +21,7 @@ logger = logging.getLogger("sentinel.collector")
 
 STATUS_FILE = Path("data/collect_status.json")
 PID_FILE = Path("data/collect.pid")
+LOG_FILE = Path("data/collect.log")
 
 
 @dataclass
@@ -31,11 +32,16 @@ class CollectionStatus:
     tickers: list[str] = field(default_factory=list)
     n_per_ticker: int = 0
     phase: str = ""
+    # Scraping progress
+    tickers_scraped: int = 0
+    tickers_total: int = 0
+    scrape_tweets_found: int = 0
+    current_ticker: str | None = None
+    # Enrichment progress
     scraped: int = 0
     enriched: int = 0
     labeled: int = 0
     failed: int = 0
-    current_ticker: str | None = None
     last_update: str | None = None
     error: str | None = None
     finished_at: str | None = None
@@ -102,6 +108,12 @@ async def run_collection(
     from .price_fetcher import PriceFetcher
     from .scraper import DefenseStockScraper
 
+    # Set up file logging so `status` can show recent output
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(LOG_FILE, mode="w")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S"))
+    logging.getLogger().addHandler(file_handler)
+
     status = CollectionStatus(
         pid=os.getpid(),
         state="scraping",
@@ -132,16 +144,29 @@ async def run_collection(
         signal.signal(signal.SIGINT, _handle_signal)
 
     try:
+        status.tickers_total = len(ticker_list)
         _update_status(status)
 
         # 1. Scrape
         scraper = DefenseStockScraper(config.twitter.db_path)
+
+        def _on_ticker_done(ticker, total_claims, tickers_done, tickers_total):
+            status.current_ticker = ticker
+            status.tickers_scraped = tickers_done
+            status.tickers_total = tickers_total
+            status.scrape_tweets_found = total_claims
+            _update_status(status)
+
         claims = await scraper.scrape_defense_claims(
-            tickers=ticker_list, limit_per_ticker=n_per_ticker,
+            tickers=ticker_list,
+            limit_per_ticker=n_per_ticker,
+            on_ticker_done=_on_ticker_done,
         )
         status.scraped = len(claims)
+        status.scrape_tweets_found = len(claims)
         status.phase = "enriching"
         status.state = "enriching"
+        status.current_ticker = None
         _update_status(status)
         logger.info(f"Scraped {len(claims)} raw claims")
 
