@@ -1,0 +1,62 @@
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# twscrape database (contains account credentials)
+accounts.db
+*.json
+
+config.yaml
+
+# Digest history database (local data)
+digest_history.db
+
+# Vector memory store (ChromaDB local storage)
+memory_store/
+
+# Generic database files (in case of other SQLite usage)
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Runtime files (pid, logs, checkpoints)
+.run/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# uv
+.uv/
