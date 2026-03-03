@@ -8,11 +8,11 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=yourusername
-Group=yourusername
-WorkingDirectory=/home/yourusername/Sentinel
+User=sentinel
+Group=sentinel
+WorkingDirectory=/opt/sentinel/app
 
-ExecStart=/home/yourusername/.local/bin/uv run python main.py serve --port 5000 --workers 4
+ExecStart=/home/sentinel/.local/bin/uv run serve --port 5000 --workers 4
 
 Restart=on-failure
 RestartSec=30

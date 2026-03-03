@@ -1,17 +1,26 @@
 """
-CLI entry point for Sentinel.
+CLI entry points for Sentinel.
 
-Commands:
-  sentinel setup      — Initialize DB, download models, train, run experiment
-  sentinel collect    — Scrape and label defense stock claims
-  sentinel serve      — Start the Flask API server
-  sentinel train      — Train/retrain ML models
-  sentinel experiment — Run news ablation experiment
+Each function is a standalone click command exposed via pyproject.toml [project.scripts].
+
+Usage:
+  uv run setup                        — Initialize DB, sanity check
+  uv run collect --n 100              — Scrape and label claims
+  uv run collect --n 100 --background — Run collection in background
+  uv run status                       — Check collection progress
+  uv run stop                         — Stop background collection
+  uv run serve                        — Start API server
+  uv run train                        — Train ML models
+  uv run experiment                   — Run news ablation
 """
 
 import asyncio
 import logging
+import os
+import signal
 import sys
+from datetime import datetime
+from pathlib import Path
 
 import click
 
@@ -20,16 +29,15 @@ from .config import config
 logger = logging.getLogger("sentinel.cli")
 
 
-@click.group()
-def cli():
-    """Sentinel — Defense Stock Claim Analyzer."""
+def _init():
+    """Common initialization for all commands."""
     config.setup_logging()
 
 
-@cli.command()
+@click.command()
 def setup():
-    """Initialize database, download models, and run initial training."""
-    from pathlib import Path
+    """Initialize database, download models, and run sanity checks."""
+    _init()
 
     click.echo("=== Sentinel Setup ===")
 
@@ -62,9 +70,8 @@ def setup():
         click.echo(f"[3/5] spaCy model not found. Run: python -m spacy download {config.app.spacy_model}")
 
     # 4. Sanity check with hardcoded examples
-    from .data.models import RawClaim
     from .data.labeler import label_claim
-    from datetime import datetime
+    from .data.models import RawClaim
 
     examples = [
         RawClaim(
@@ -102,85 +109,180 @@ def setup():
 
     click.echo("[5/5] Setup complete.")
     click.echo("\nNext steps:")
-    click.echo("  uv run python main.py collect --n 100  # Scrape claims")
-    click.echo("  uv run python main.py serve            # Start API server")
+    click.echo("  uv run collect --n 100  # Scrape claims")
+    click.echo("  uv run serve            # Start API server")
 
 
-@cli.command()
+@click.command()
 @click.option("--n", "n_per_ticker", default=50, help="Tweets per ticker")
 @click.option("--tickers", default=None, help="Comma-separated tickers (default: all)")
-def collect(n_per_ticker: int, tickers: str | None):
+@click.option("--background", is_flag=True, help="Run in background")
+@click.option("--_daemonized", is_flag=True, hidden=True)
+def collect(n_per_ticker: int, tickers: str | None, background: bool, _daemonized: bool):
     """Scrape and label defense stock claims."""
-    from .scraper import DefenseStockScraper
-    from .price_fetcher import PriceFetcher
-    from .news_fetcher import fetch_news_for_claim, classify_catalyst
-    from .data.labeler import label_claim
-    from .data.db import SentinelDB
+    _init()
+
+    from .collector import is_running
+
+    if background and not _daemonized:
+        if is_running():
+            click.echo("A collection is already running. Use 'uv run status' to check progress.")
+            sys.exit(1)
+
+        import shutil
+        import subprocess
+
+        Path("data").mkdir(parents=True, exist_ok=True)
+        log_file = open("data/collect.log", "w")
+
+        collect_bin = shutil.which("collect")
+        if collect_bin is None:
+            collect_bin = str(Path(sys.executable).parent / "collect")
+
+        cmd = [collect_bin, "--n", str(n_per_ticker), "--_daemonized"]
+        if tickers:
+            cmd.extend(["--tickers", tickers])
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        click.echo(f"Collection started in background (PID {proc.pid})")
+        click.echo("  uv run status  — check progress")
+        click.echo("  uv run stop    — stop collection")
+        return
+
+    # Foreground or daemonized run
+    from .collector import read_status, run_collection
     from .data.stocks import get_public_tickers
 
     ticker_list = tickers.split(",") if tickers else get_public_tickers()
-    click.echo(f"Collecting claims for {len(ticker_list)} tickers, {n_per_ticker} each")
 
-    async def run():
-        scraper = DefenseStockScraper(config.twitter.db_path)
-        claims = await scraper.scrape_defense_claims(
-            tickers=ticker_list, limit_per_ticker=n_per_ticker,
+    if not _daemonized:
+        click.echo(f"Collecting claims for {len(ticker_list)} tickers, {n_per_ticker} each")
+
+    asyncio.run(run_collection(
+        n_per_ticker=n_per_ticker,
+        ticker_list=ticker_list,
+        database_url=config.database.url,
+    ))
+
+    if not _daemonized:
+        st = read_status()
+        if st:
+            click.echo(f"Done: {st.labeled} labeled, {st.failed} failed")
+
+
+@click.command()
+def status():
+    """Check collection progress."""
+    _init()
+
+    from .collector import is_running, read_status
+
+    st = read_status()
+    if st is None:
+        click.echo("No collection has been run yet.")
+        return
+
+    running = is_running()
+
+    if running and st.state in ("scraping", "enriching"):
+        started = datetime.fromisoformat(st.started_at)
+        elapsed = datetime.now() - started
+        minutes = int(elapsed.total_seconds() // 60)
+        seconds = int(elapsed.total_seconds() % 60)
+
+        click.echo("Sentinel Collection Status")
+        click.echo(f"  State:    {st.state}")
+        click.echo(f"  Started:  {minutes}m {seconds}s ago")
+        click.echo(f"  Phase:    {st.phase}")
+
+        if st.state == "scraping":
+            click.echo(f"  Scraping tweets for {len(st.tickers)} tickers...")
+        else:
+            total = st.scraped
+            done = st.enriched
+            pct = (done / total * 100) if total > 0 else 0
+            click.echo(f"  Progress: {done}/{total} claims enriched ({pct:.0f}%)")
+
+        if st.current_ticker:
+            click.echo(f"  Current:  {st.current_ticker}")
+        click.echo(f"  Labeled:  {st.labeled}")
+        click.echo(f"  Failed:   {st.failed}")
+        click.echo(f"  PID:      {st.pid}")
+    else:
+        click.echo("No collection running.")
+        state_label = st.state
+        if not running and st.state in ("scraping", "enriching"):
+            state_label = "interrupted"
+
+        finished = ""
+        if st.finished_at:
+            finished = f" ({st.finished_at[:16].replace('T', ' ')})"
+        elif st.started_at:
+            finished = f" ({st.started_at[:16].replace('T', ' ')})"
+
+        click.echo(
+            f"Last run: {state_label} — "
+            f"{st.scraped} scraped, {st.labeled} labeled, {st.failed} failed"
+            f"{finished}"
         )
-        click.echo(f"Scraped {len(claims)} raw claims")
 
-        # Enrich with price and news
-        pf = PriceFetcher()
-        labeled_count = 0
-
-        db = None
-        if config.database.url:
-            db = SentinelDB(config.database.url)
-            db.connect()
-            db.init_schema()
-
-        for i, claim in enumerate(claims):
-            try:
-                # Price
-                move = pf.get_price_change(claim.ticker, claim.created_at, hours=24)
-                claim.price_at_tweet = move.price_at
-                claim.price_24h_later = move.price_after
-                claim.price_change_pct = move.change_pct
-
-                # News
-                articles = await fetch_news_for_claim(
-                    claim.ticker, claim.company_name, claim.created_at,
-                )
-                claim.news_headlines = [a["title"] for a in articles if a.get("title")]
-                claim.has_catalyst, claim.catalyst_type = classify_catalyst(claim.news_headlines)
-
-                # Label
-                labeled = label_claim(claim)
-                labeled_count += 1
-
-                if db:
-                    db.insert_labeled_claim(labeled)
-
-                if (i + 1) % 10 == 0:
-                    click.echo(f"  Processed {i + 1}/{len(claims)} claims")
-
-            except Exception as e:
-                logger.warning(f"Failed to process claim {claim.tweet_id}: {e}")
-
-        if db:
-            db.close()
-
-        click.echo(f"Done: {labeled_count} claims labeled and stored")
-
-    asyncio.run(run())
+        if st.error:
+            click.echo(f"Error: {st.error}")
 
 
-@cli.command()
+@click.command()
+def stop():
+    """Stop a background collection."""
+    _init()
+
+    from .collector import PID_FILE, _update_status, is_running, read_status
+
+    if not is_running():
+        click.echo("No collection is currently running.")
+        return
+
+    try:
+        pid = int(PID_FILE.read_text().strip())
+    except (ValueError, FileNotFoundError):
+        click.echo("Could not read PID file.")
+        return
+
+    click.echo(f"Stopping collection (PID {pid})...")
+
+    try:
+        if sys.platform == "win32":
+            os.kill(pid, signal.SIGTERM)
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        click.echo("Process already exited.")
+        PID_FILE.unlink(missing_ok=True)
+        return
+
+    st = read_status()
+    if st and st.state not in ("completed", "failed", "stopped"):
+        st.state = "stopped"
+        st.finished_at = datetime.now().isoformat()
+        _update_status(st)
+
+    PID_FILE.unlink(missing_ok=True)
+    click.echo("Collection stopped.")
+
+
+@click.command()
 @click.option("--host", default="0.0.0.0", help="Host to bind")
 @click.option("--port", default=None, type=int, help="Port (default from config)")
 @click.option("--workers", default=4, type=int, help="Number of gunicorn workers")
 @click.option("--dev", is_flag=True, help="Run Flask dev server instead of gunicorn")
 def serve(host: str, port: int | None, workers: int, dev: bool):
     """Start the Sentinel API server (gunicorn by default)."""
+    _init()
+
     from .api.app import create_app
 
     port = port or config.app.port
@@ -202,7 +304,7 @@ def serve(host: str, port: int | None, workers: int, dev: bool):
         ], check=True)
 
 
-@cli.command()
+@click.command()
 @click.option(
     "--model", "model_name",
     type=click.Choice(["all", "baseline", "classical", "neural"]),
@@ -211,10 +313,11 @@ def serve(host: str, port: int | None, workers: int, dev: bool):
 )
 def train(model_name: str):
     """Train ML models on labeled data."""
+    _init()
+
     click.echo(f"Training: {model_name}")
     click.echo("Note: Requires labeled data in PostgreSQL. Run 'collect' first.")
 
-    # This is a placeholder — full training requires collected data
     if model_name in ("all", "baseline"):
         click.echo("Baseline: majority class classifier (trained at prediction time)")
 
@@ -225,9 +328,11 @@ def train(model_name: str):
         click.echo("Neural: FinBERT + MiniLM fusion (requires labeled data + GPU recommended)")
 
 
-@cli.command()
+@click.command()
 def experiment():
     """Run the news feature ablation experiment."""
+    _init()
+
     click.echo("Running news ablation experiment...")
     click.echo("Note: Requires labeled data. Run 'collect' first to build dataset.")
     click.echo("Results will be saved to data/outputs/news_ablation.png")

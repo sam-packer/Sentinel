@@ -19,19 +19,19 @@ Sentinel scrapes tweets about defense stocks (LMT, RTX, NOC, etc.), fetches the 
 
 ```bash
 uv sync
-uv run python main.py setup
-uv run python main.py collect --n 100
-uv run python main.py serve
+uv run setup
+uv run collect --n 100
+uv run serve
 ```
 
 ## CLI Commands
 
 ```
-uv run python main.py setup       # Init DB, sanity check
-uv run python main.py collect     # Scrape + label claims
-uv run python main.py serve       # Start Flask API
-uv run python main.py train       # Train ML models
-uv run python main.py experiment  # Run news ablation
+uv run setup       # Init DB, sanity check
+uv run collect     # Scrape + label claims
+uv run serve       # Start Flask API
+uv run train       # Train ML models
+uv run experiment  # Run news ablation
 ```
 
 ## Testing
