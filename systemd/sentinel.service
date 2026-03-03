@@ -7,7 +7,7 @@ StartLimitIntervalSec=1800
 StartLimitBurst=5
 
 [Service]
-Type=simple
+Type=exec
 User=sentinel
 Group=sentinel
 WorkingDirectory=/opt/sentinel/app
@@ -17,11 +17,15 @@ ExecStart=/home/sentinel/.local/bin/uv run serve --port 5000 --workers 4
 Restart=on-failure
 RestartSec=30
 
+# Kill the entire process group (master + workers), not just the master
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
 MemoryMax=1G
 CPUQuota=80%
 
 TimeoutStartSec=30
-TimeoutStopSec=60
 
 StandardOutput=journal
 StandardError=journal
