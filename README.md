@@ -155,10 +155,15 @@ uv run serve
 | `collect`                           | Scrape, enrich, label, store            |
 | `collect -n 100 --tickers LMT,RTX`  | Specific tickers                        |
 | `collect --background`              | Run in background                       |
+| `collect --status`                  | Check background collection progress    |
+| `collect --stop`                    | Stop background collection              |
 | `collect --since 2d`                | Only tweets from the last 2 days        |
 | `collect --market-open yesterday`   | Tweets around yesterday's open (9:00-10:30 AM ET) |
-| `status`                            | Check background collection progress    |
-| `stop`                              | Stop background collection              |
+| `enrich`                            | Re-enrich existing claims with fresh price/news data |
+| `enrich --unlabeled`                | Only enrich claims that haven't been labeled yet |
+| `enrich --background`               | Run enrichment in background            |
+| `enrich --status`                   | Check background enrichment progress    |
+| `enrich --stop`                     | Stop background enrichment              |
 | `serve`                             | Start API (gunicorn, 4 workers)         |
 | `serve --dev`                       | Flask dev server with hot reload        |
 

@@ -7,10 +7,12 @@ Usage:
   uv run setup                        — Initialize DB, sanity check
   uv run collect --n 100              — Scrape and label claims
   uv run collect --n 100 --background — Run collection in background
+  uv run collect --status             — Check collection progress
+  uv run collect --stop               — Stop background collection
   uv run enrich                       — Re-enrich existing claims
-  uv run enrich --unlabeled           — Only enrich claims without labels
-  uv run status                       — Check collection progress
-  uv run stop                         — Stop background collection
+  uv run enrich --background          — Run enrichment in background
+  uv run enrich --status              — Check enrichment progress
+  uv run enrich --stop                — Stop background enrichment
   uv run serve                        — Start API server
 """
 
@@ -43,6 +45,173 @@ def _init():
     """Common initialization for all commands."""
     config.setup_logging()
 
+
+# ---------------------------------------------------------------------------
+# Shared helpers for --status and --stop
+# ---------------------------------------------------------------------------
+
+def _show_status(name: str) -> None:
+    """Display status for a background task (collect or enrich)."""
+    from .collector import _log_file, is_running, read_status
+
+    st = read_status(name)
+    if st is None:
+        click.echo(f"No {name} has been run yet.")
+        return
+
+    running = is_running(name)
+
+    if running and st.state in ("scraping", "enriching"):
+        started = datetime.fromisoformat(st.started_at)
+        elapsed = datetime.now() - started
+        minutes = int(elapsed.total_seconds() // 60)
+        seconds = int(elapsed.total_seconds() % 60)
+
+        click.echo(f"Sentinel {name.title()} Status")
+        click.echo(f"  State:    {st.state}")
+        click.echo(f"  Started:  {minutes}m {seconds}s ago")
+        click.echo(f"  Phase:    {st.phase}")
+
+        if st.state == "scraping":
+            pct = (st.tickers_scraped / st.tickers_total * 100) if st.tickers_total > 0 else 0
+            click.echo(f"  Tickers:  {st.tickers_scraped}/{st.tickers_total} ({pct:.0f}%)")
+            click.echo(f"  Tweets:   {st.scrape_tweets_found} found so far")
+            if st.current_ticker:
+                click.echo(f"  Current:  {st.current_ticker}")
+        else:
+            total = st.scraped
+            done = st.enriched
+            pct = (done / total * 100) if total > 0 else 0
+            click.echo(f"  Progress: {done}/{total} claims enriched ({pct:.0f}%)")
+            if st.current_ticker:
+                click.echo(f"  Current:  {st.current_ticker}")
+            click.echo(f"  Labeled:  {st.labeled}")
+            click.echo(f"  Failed:   {st.failed}")
+
+        click.echo(f"  PID:      {st.pid}")
+
+        lf = _log_file(name)
+        if lf.exists():
+            click.echo("")
+            click.echo("Recent log output:")
+            try:
+                lines = lf.read_text().splitlines()
+                for line in lines[-10:]:
+                    click.echo(f"  {line}")
+            except Exception:
+                pass
+    else:
+        click.echo(f"No {name} running.")
+        state_label = st.state
+        if not running and st.state in ("scraping", "enriching"):
+            state_label = "interrupted"
+
+        finished = ""
+        if st.finished_at:
+            finished = f" ({st.finished_at[:16].replace('T', ' ')})"
+        elif st.started_at:
+            finished = f" ({st.started_at[:16].replace('T', ' ')})"
+
+        click.echo(
+            f"Last run: {state_label} — "
+            f"{st.scraped} scraped, {st.labeled} labeled, {st.failed} failed"
+            f"{finished}"
+        )
+
+        if st.error:
+            click.echo(f"Error: {st.error}")
+
+
+def _stop_background(name: str) -> None:
+    """Stop a background task (collect or enrich)."""
+    from .collector import _pid_file, _update_status, is_running, read_status
+
+    if not is_running(name):
+        click.echo(f"No {name} is currently running.")
+        return
+
+    pf = _pid_file(name)
+    try:
+        pid = int(pf.read_text().strip())
+    except (ValueError, FileNotFoundError):
+        click.echo("Could not read PID file.")
+        return
+
+    click.echo(f"Stopping {name} (PID {pid})...")
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        click.echo("Process already exited.")
+        pf.unlink(missing_ok=True)
+        return
+
+    st = read_status(name)
+    if st and st.state not in ("completed", "failed", "stopped"):
+        st.state = "stopped"
+        st.finished_at = datetime.now().isoformat()
+        _update_status(st, name)
+
+    pf.unlink(missing_ok=True)
+    click.echo(f"{name.title()} stopped.")
+
+
+# ---------------------------------------------------------------------------
+# Time parsing
+# ---------------------------------------------------------------------------
+
+def _parse_time(value: str, tz: timezone | ZoneInfo = ET) -> datetime:
+    """Parse a time string into a timezone-aware datetime.
+
+    Relative durations are computed from the current time (always UTC-based).
+    Absolute times without an explicit offset are interpreted in ``tz``
+    (defaults to US Eastern).
+
+    Supports:
+      - Relative durations: "30m", "1h", "2d", "1w" (subtracted from now)
+      - ISO datetime: "2026-03-02T09:30:00" (interpreted as ``tz``)
+      - Date only: "2026-03-02" (midnight in ``tz``)
+      - "now" keyword
+    """
+    value = value.strip()
+
+    if value.lower() == "now":
+        return datetime.now(timezone.utc)
+
+    # Relative duration: e.g. "30m", "2h", "1d", "1w"
+    match = re.fullmatch(r"(\d+)\s*([mhdw])", value, re.IGNORECASE)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2).lower()
+        delta = {"m": timedelta(minutes=amount), "h": timedelta(hours=amount),
+                 "d": timedelta(days=amount), "w": timedelta(weeks=amount)}[unit]
+        return datetime.now(timezone.utc) - delta
+
+    # ISO datetime or date-only — bare values are interpreted in the given tz
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(value, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=tz)
+            return dt
+        except ValueError:
+            continue
+
+    raise click.BadParameter(
+        f"Cannot parse '{value}'. Use relative (e.g. 1h, 30m, 2d) "
+        f"or ISO format (e.g. 2026-03-02, 2026-03-02T09:30)."
+    )
+
+
+def _format_time(dt: datetime) -> str:
+    """Format a datetime for display, showing the timezone abbreviation."""
+    et_dt = dt.astimezone(ET)
+    return et_dt.strftime("%Y-%m-%d %H:%M %Z")
+
+
+# ---------------------------------------------------------------------------
+# setup
+# ---------------------------------------------------------------------------
 
 @click.command()
 def setup():
@@ -123,56 +292,9 @@ def setup():
     click.echo("  uv run serve            # Start API server")
 
 
-def _parse_time(value: str, tz: timezone | ZoneInfo = ET) -> datetime:
-    """Parse a time string into a timezone-aware datetime.
-
-    Relative durations are computed from the current time (always UTC-based).
-    Absolute times without an explicit offset are interpreted in ``tz``
-    (defaults to US Eastern).
-
-    Supports:
-      - Relative durations: "30m", "1h", "2d", "1w" (subtracted from now)
-      - ISO datetime: "2026-03-02T09:30:00" (interpreted as ``tz``)
-      - Date only: "2026-03-02" (midnight in ``tz``)
-      - "now" keyword
-    """
-    value = value.strip()
-
-    if value.lower() == "now":
-        return datetime.now(timezone.utc)
-
-    # Relative duration: e.g. "30m", "2h", "1d", "1w"
-    match = re.fullmatch(r"(\d+)\s*([mhdw])", value, re.IGNORECASE)
-    if match:
-        amount = int(match.group(1))
-        unit = match.group(2).lower()
-        delta = {"m": timedelta(minutes=amount), "h": timedelta(hours=amount),
-                 "d": timedelta(days=amount), "w": timedelta(weeks=amount)}[unit]
-        return datetime.now(timezone.utc) - delta
-
-    # ISO datetime or date-only — bare values are interpreted in the given tz
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
-        try:
-            dt = datetime.strptime(value, fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=tz)
-            return dt
-        except ValueError:
-            continue
-
-    raise click.BadParameter(
-        f"Cannot parse '{value}'. Use relative (e.g. 1h, 30m, 2d) "
-        f"or ISO format (e.g. 2026-03-02, 2026-03-02T09:30)."
-    )
-
-
-def _format_time(dt: datetime) -> str:
-    """Format a datetime for display, showing the timezone abbreviation."""
-    # Convert to ET for display so times are always shown in market time
-    et_dt = dt.astimezone(ET)
-    # %Z gives 'EST' or 'EDT' depending on DST
-    return et_dt.strftime("%Y-%m-%d %H:%M %Z")
-
+# ---------------------------------------------------------------------------
+# collect
+# ---------------------------------------------------------------------------
 
 @click.command()
 @click.option("-n", "n_per_ticker", default=50, help="Tweets per ticker")
@@ -188,6 +310,8 @@ def _format_time(dt: datetime) -> str:
               help="Scrape tweets around market open (9:00-10:30 AM ET) on DATE. "
                    "Use 'today', 'yesterday', or YYYY-MM-DD.")
 @click.option("--background", is_flag=True, help="Run in background")
+@click.option("--status", "show_status", is_flag=True, help="Check background collection progress")
+@click.option("--stop", "do_stop", is_flag=True, help="Stop background collection")
 @click.option("--_daemonized", is_flag=True, hidden=True)
 def collect(
     n_per_ticker: int,
@@ -196,10 +320,20 @@ def collect(
     until_str: str | None,
     market_open_date: str | None,
     background: bool,
+    show_status: bool,
+    do_stop: bool,
     _daemonized: bool,
 ):
     """Scrape and label defense stock claims."""
     _init()
+
+    if show_status:
+        _show_status("collect")
+        return
+
+    if do_stop:
+        _stop_background("collect")
+        return
 
     # Parse time window
     since = None
@@ -210,7 +344,6 @@ def collect(
         sys.exit(1)
 
     if market_open_date:
-        # Resolve the date
         mo = market_open_date.strip().lower()
         if mo == "today":
             target = datetime.now(ET).date()
@@ -226,7 +359,6 @@ def collect(
                 )
                 sys.exit(1)
 
-        # Market open window: 9:00 AM - 10:30 AM ET
         since = datetime(target.year, target.month, target.day, 9, 0, tzinfo=ET)
         until = datetime(target.year, target.month, target.day, 10, 30, tzinfo=ET)
         click.echo(f"Market-open mode: {_format_time(since)} to {_format_time(until)}")
@@ -243,8 +375,8 @@ def collect(
     from .collector import is_running
 
     if background and not _daemonized:
-        if is_running():
-            click.echo("A collection is already running. Use 'uv run status' to check progress.")
+        if is_running("collect"):
+            click.echo("A collection is already running. Use 'uv run collect --status' to check progress.")
             sys.exit(1)
 
         import shutil
@@ -274,8 +406,8 @@ def collect(
             start_new_session=True,
         )
         click.echo(f"Collection started in background (PID {proc.pid})")
-        click.echo("  uv run status  — check progress")
-        click.echo("  uv run stop    — stop collection")
+        click.echo("  uv run collect --status  — check progress")
+        click.echo("  uv run collect --stop    — stop collection")
         return
 
     # Foreground or daemonized run
@@ -301,10 +433,14 @@ def collect(
     ))
 
     if not _daemonized:
-        st = read_status()
+        st = read_status("collect")
         if st:
             click.echo(f"Done: {st.labeled} labeled, {st.failed} failed")
 
+
+# ---------------------------------------------------------------------------
+# enrich
+# ---------------------------------------------------------------------------
 
 @click.command()
 @click.option("--tickers", default=None, help="Comma-separated tickers (default: all)")
@@ -315,14 +451,30 @@ def collect(
               help="Only enrich claims created before this time. "
                    "Relative (1h, 30m, 2d) or ISO in ET (2026-03-02T09:30)")
 @click.option("--unlabeled", is_flag=True, help="Only enrich claims that haven't been labeled yet")
+@click.option("--background", is_flag=True, help="Run in background")
+@click.option("--status", "show_status", is_flag=True, help="Check background enrichment progress")
+@click.option("--stop", "do_stop", is_flag=True, help="Stop background enrichment")
+@click.option("--_daemonized", is_flag=True, hidden=True)
 def enrich(
     tickers: str | None,
     since_str: str | None,
     until_str: str | None,
     unlabeled: bool,
+    background: bool,
+    show_status: bool,
+    do_stop: bool,
+    _daemonized: bool,
 ):
     """Re-enrich existing raw claims with fresh price and news data."""
     _init()
+
+    if show_status:
+        _show_status("enrich")
+        return
+
+    if do_stop:
+        _stop_background("enrich")
+        return
 
     if not config.database.url:
         click.echo("Error: DATABASE_URL not set. Enrich reads from the database.", err=True)
@@ -337,19 +489,59 @@ def enrich(
 
     ticker_list = tickers.split(",") if tickers else None
 
-    from .collector import run_enrichment
+    from .collector import is_running
 
-    parts = ["Re-enriching"]
-    if unlabeled:
-        parts.append("unlabeled")
-    parts.append("claims")
-    if ticker_list:
-        parts.append(f"for {', '.join(ticker_list)}")
-    if since:
-        parts.append(f"since {_format_time(since)}")
-    if until:
-        parts.append(f"until {_format_time(until)}")
-    click.echo(" ".join(parts))
+    if background and not _daemonized:
+        if is_running("enrich"):
+            click.echo("Enrichment is already running. Use 'uv run enrich --status' to check progress.")
+            sys.exit(1)
+
+        import shutil
+        import subprocess
+
+        Path("data").mkdir(parents=True, exist_ok=True)
+        log_file = open("data/enrich.log", "w")
+
+        enrich_bin = shutil.which("enrich")
+        if enrich_bin is None:
+            enrich_bin = str(Path(sys.executable).parent / "enrich")
+
+        cmd = [enrich_bin, "--_daemonized"]
+        if tickers:
+            cmd.extend(["--tickers", tickers])
+        if since_str:
+            cmd.extend(["--since", since_str])
+        if until_str:
+            cmd.extend(["--until", until_str])
+        if unlabeled:
+            cmd.append("--unlabeled")
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        click.echo(f"Enrichment started in background (PID {proc.pid})")
+        click.echo("  uv run enrich --status  — check progress")
+        click.echo("  uv run enrich --stop    — stop enrichment")
+        return
+
+    # Foreground or daemonized run
+    from .collector import read_status, run_enrichment
+
+    if not _daemonized:
+        parts = ["Re-enriching"]
+        if unlabeled:
+            parts.append("unlabeled")
+        parts.append("claims")
+        if ticker_list:
+            parts.append(f"for {', '.join(ticker_list)}")
+        if since:
+            parts.append(f"since {_format_time(since)}")
+        if until:
+            parts.append(f"until {_format_time(until)}")
+        click.echo(" ".join(parts))
 
     asyncio.run(run_enrichment(
         database_url=config.database.url,
@@ -359,122 +551,15 @@ def enrich(
         unlabeled_only=unlabeled,
     ))
 
-    click.echo("Done.")
+    if not _daemonized:
+        st = read_status("enrich")
+        if st:
+            click.echo(f"Done: {st.labeled} labeled, {st.failed} failed")
 
 
-@click.command()
-def status():
-    """Check collection progress."""
-    _init()
-
-    from .collector import LOG_FILE, is_running, read_status
-
-    st = read_status()
-    if st is None:
-        click.echo("No collection has been run yet.")
-        return
-
-    running = is_running()
-
-    if running and st.state in ("scraping", "enriching"):
-        started = datetime.fromisoformat(st.started_at)
-        elapsed = datetime.now() - started
-        minutes = int(elapsed.total_seconds() // 60)
-        seconds = int(elapsed.total_seconds() % 60)
-
-        click.echo("Sentinel Collection Status")
-        click.echo(f"  State:    {st.state}")
-        click.echo(f"  Started:  {minutes}m {seconds}s ago")
-        click.echo(f"  Phase:    {st.phase}")
-
-        if st.state == "scraping":
-            pct = (st.tickers_scraped / st.tickers_total * 100) if st.tickers_total > 0 else 0
-            click.echo(f"  Tickers:  {st.tickers_scraped}/{st.tickers_total} ({pct:.0f}%)")
-            click.echo(f"  Tweets:   {st.scrape_tweets_found} found so far")
-            if st.current_ticker:
-                click.echo(f"  Current:  {st.current_ticker}")
-        else:
-            total = st.scraped
-            done = st.enriched
-            pct = (done / total * 100) if total > 0 else 0
-            click.echo(f"  Progress: {done}/{total} claims enriched ({pct:.0f}%)")
-            if st.current_ticker:
-                click.echo(f"  Current:  {st.current_ticker}")
-            click.echo(f"  Labeled:  {st.labeled}")
-            click.echo(f"  Failed:   {st.failed}")
-
-        click.echo(f"  PID:      {st.pid}")
-
-        # Show recent log output
-        if LOG_FILE.exists():
-            click.echo("")
-            click.echo("Recent log output:")
-            try:
-                lines = LOG_FILE.read_text().splitlines()
-                for line in lines[-10:]:
-                    click.echo(f"  {line}")
-            except Exception:
-                pass
-    else:
-        click.echo("No collection running.")
-        state_label = st.state
-        if not running and st.state in ("scraping", "enriching"):
-            state_label = "interrupted"
-
-        finished = ""
-        if st.finished_at:
-            finished = f" ({st.finished_at[:16].replace('T', ' ')})"
-        elif st.started_at:
-            finished = f" ({st.started_at[:16].replace('T', ' ')})"
-
-        click.echo(
-            f"Last run: {state_label} — "
-            f"{st.scraped} scraped, {st.labeled} labeled, {st.failed} failed"
-            f"{finished}"
-        )
-
-        if st.error:
-            click.echo(f"Error: {st.error}")
-
-
-@click.command()
-def stop():
-    """Stop a background collection."""
-    _init()
-
-    from .collector import PID_FILE, _update_status, is_running, read_status
-
-    if not is_running():
-        click.echo("No collection is currently running.")
-        return
-
-    try:
-        pid = int(PID_FILE.read_text().strip())
-    except (ValueError, FileNotFoundError):
-        click.echo("Could not read PID file.")
-        return
-
-    click.echo(f"Stopping collection (PID {pid})...")
-
-    try:
-        if sys.platform == "win32":
-            os.kill(pid, signal.SIGTERM)
-        else:
-            os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        click.echo("Process already exited.")
-        PID_FILE.unlink(missing_ok=True)
-        return
-
-    st = read_status()
-    if st and st.state not in ("completed", "failed", "stopped"):
-        st.state = "stopped"
-        st.finished_at = datetime.now().isoformat()
-        _update_status(st)
-
-    PID_FILE.unlink(missing_ok=True)
-    click.echo("Collection stopped.")
-
+# ---------------------------------------------------------------------------
+# serve
+# ---------------------------------------------------------------------------
 
 @click.command()
 @click.option("--host", default="0.0.0.0", help="Host to bind")
@@ -503,5 +588,3 @@ def serve(host: str, port: int | None, workers: int, dev: bool):
             "--access-logfile", "-",
             "--error-logfile", "-",
         ])
-
-

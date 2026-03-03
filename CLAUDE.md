@@ -27,11 +27,13 @@ uv run serve
 ## CLI Commands
 
 ```
-uv run setup       # Init DB, sanity check
-uv run collect     # Scrape + enrich + label claims
-uv run status      # Check background collection progress
-uv run stop        # Stop background collection
-uv run serve       # Start Flask API
+uv run setup              # Init DB, sanity check
+uv run collect            # Scrape + enrich + label claims
+uv run collect --status   # Check background collection progress
+uv run collect --stop     # Stop background collection
+uv run enrich             # Re-enrich existing claims
+uv run enrich --status    # Check background enrichment progress
+uv run serve              # Start Flask API
 ```
 
 ## Testing
