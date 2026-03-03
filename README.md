@@ -1,6 +1,7 @@
 # Sentinel
 
-Defense Stock Claim Analyzer — scrapes social media claims about defense stocks, fetches actual price data and news catalysts, and classifies each claim as **exaggerated**, **accurate**, or **understated**.
+Defense Stock Claim Analyzer — scrapes social media claims about defense stocks, fetches actual price data and news
+catalysts, and classifies each claim as **exaggerated**, **accurate**, or **understated**.
 
 Tracks 15 defense companies (LMT, RTX, NOC, GD, BA, LHX, HII, LDOS, BAH, KTOS, PLTR, and more) across Twitter/X.
 
@@ -28,8 +29,10 @@ sudo -u postgres psql
 ```
 
 ```sql
-CREATE USER sentinel WITH PASSWORD 'your-secure-password';
-CREATE DATABASE sentinel_db OWNER sentinel;
+CREATE
+USER sentinel WITH PASSWORD 'your-secure-password';
+CREATE
+DATABASE sentinel_db OWNER sentinel;
 \q
 ```
 
@@ -60,7 +63,8 @@ See `config.example.yaml` for all application settings (model params, labeling t
 
 ### 5. Add Twitter accounts
 
-Sentinel uses [twscrape](https://github.com/vladkens/twscrape) to scrape tweets. You need at least one Twitter/X account with exported cookies.
+Sentinel uses [twscrape](https://github.com/vladkens/twscrape) to scrape tweets. You need at least one Twitter/X account
+with exported cookies.
 
 1. Log into Twitter/X in your browser
 2. Export cookies as JSON using a browser extension (e.g., "Cookie-Editor" or "Get cookies.txt")
@@ -98,34 +102,34 @@ The API will be available at `http://localhost:5000`.
 
 ## CLI Reference
 
-| Command | Description |
-|---|---|
-| `setup` | Create directories, init DB schema, sanity check labeler |
-| `collect` | Scrape tweets, fetch prices/news, label claims, store in DB |
-| `collect --n 100 --tickers LMT,RTX` | Collect for specific tickers |
-| `collect --background` | Run collection in the background |
-| `status` | Check background collection progress |
-| `stop` | Stop a background collection |
-| `serve` | Start API server via gunicorn |
-| `serve --dev` | Start Flask dev server (hot reload) |
-| `serve --port 8080 --workers 8` | Custom port and worker count |
-| `train` | Train ML models on collected data |
-| `train --model classical` | Train only the classical model |
-| `experiment` | Run news feature ablation experiment |
+| Command                             | Description                                                 |
+|-------------------------------------|-------------------------------------------------------------|
+| `setup`                             | Create directories, init DB schema, sanity check labeler    |
+| `collect`                           | Scrape tweets, fetch prices/news, label claims, store in DB |
+| `collect --n 100 --tickers LMT,RTX` | Collect for specific tickers                                |
+| `collect --background`              | Run collection in the background                            |
+| `status`                            | Check background collection progress                        |
+| `stop`                              | Stop a background collection                                |
+| `serve`                             | Start API server via gunicorn                               |
+| `serve --dev`                       | Start Flask dev server (hot reload)                         |
+| `serve --port 8080 --workers 8`     | Custom port and worker count                                |
+| `train`                             | Train ML models on collected data                           |
+| `train --model classical`           | Train only the classical model                              |
+| `experiment`                        | Run news feature ablation experiment                        |
 
 All commands are run with `uv run`, e.g. `uv run setup`, `uv run collect --n 100`.
 
 ## API
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/analyze` | Analyze a tweet, returns label + confidence + explanation |
-| `GET` | `/api/feed` | Paginated labeled claims, newest first |
-| `GET` | `/api/feed?label=exaggerated` | Filter by label |
-| `GET` | `/api/feed/stream` | SSE stream of new claims |
-| `GET` | `/api/stats` | Label distribution, top tickers, most exaggerated users |
-| `GET` | `/api/stocks` | Defense stock universe |
-| `GET` | `/api/health` | DB ping + model status |
+| Method | Endpoint                      | Description                                               |
+|--------|-------------------------------|-----------------------------------------------------------|
+| `POST` | `/api/analyze`                | Analyze a tweet, returns label + confidence + explanation |
+| `GET`  | `/api/feed`                   | Paginated labeled claims, newest first                    |
+| `GET`  | `/api/feed?label=exaggerated` | Filter by label                                           |
+| `GET`  | `/api/feed/stream`            | SSE stream of new claims                                  |
+| `GET`  | `/api/stats`                  | Label distribution, top tickers, most exaggerated users   |
+| `GET`  | `/api/stocks`                 | Defense stock universe                                    |
+| `GET`  | `/api/health`                 | DB ping + model status                                    |
 
 ### Examples
 
@@ -150,7 +154,8 @@ Sentinel trains three classifiers on labeled claims:
 2. **Classical** — TF-IDF + handcrafted features fed into Logistic Regression / SVM with grid search over regularization
 3. **Neural** — FinBERT (tweet text) + MiniLM (news headlines) + scalar features through a fusion head
 
-The neural model uses differential learning rates (2e-5 for FinBERT, 1e-3 for the classification head) with early stopping on validation macro F1.
+The neural model uses differential learning rates (2e-5 for FinBERT, 1e-3 for the classification head) with early
+stopping on validation macro F1.
 
 ## Testing
 
@@ -160,7 +165,8 @@ uv run pytest tests/ --cov=src --cov-report=html  # with coverage
 uv run pytest tests/ -m "not slow"                # skip slow tests
 ```
 
-Tests mock all external dependencies (Twitter, yfinance, LLM providers, DuckDuckGo) and run without API keys or a database.
+Tests mock all external dependencies (Twitter, yfinance, LLM providers, DuckDuckGo) and run without API keys or a
+database.
 
 ## Deployment
 
@@ -213,9 +219,9 @@ sudo journalctl -u sentinel -f
 
 ### Environment variables
 
-| Variable | Required | Description |
-|---|---|---|
-| `DATABASE_URL` | Yes | PostgreSQL connection string |
-| `OPENAI_API_KEY` | If using OpenAI | For LLM-based analysis explanations |
-| `GOOGLE_API_KEY` | If using Google | For Gemini-based analysis explanations |
-| `TWITTER_PROXIES` | No | Comma-separated proxy list (alternative to config.yaml) |
+| Variable          | Required        | Description                                             |
+|-------------------|-----------------|---------------------------------------------------------|
+| `DATABASE_URL`    | Yes             | PostgreSQL connection string                            |
+| `OPENAI_API_KEY`  | If using OpenAI | For LLM-based analysis explanations                     |
+| `GOOGLE_API_KEY`  | If using Google | For Gemini-based analysis explanations                  |
+| `TWITTER_PROXIES` | No              | Comma-separated proxy list (alternative to config.yaml) |
