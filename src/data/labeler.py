@@ -92,6 +92,8 @@ def compute_exaggeration_score(
     price_change_pct: float | None,
     has_catalyst: bool,
     intensity: float,
+    *,
+    news_available: bool = True,
 ) -> float:
     """Compute exaggeration score from 0.0 (accurate) to 1.0 (wildly off).
 
@@ -111,8 +113,8 @@ def compute_exaggeration_score(
     if claimed != "neutral" and abs_move < 1.0:
         return min(0.4 + intensity * 0.4, 0.9)
 
-    # No catalyst but claiming big move
-    if not has_catalyst and claimed != "neutral" and abs_move < 2.0:
+    # No catalyst but claiming big move (only when we actually found news)
+    if not has_catalyst and news_available and claimed != "neutral" and abs_move < 2.0:
         return min(0.3 + intensity * 0.3, 0.8)
 
     # Direction matches and move is meaningful
@@ -170,8 +172,13 @@ def label_claim(
         # Strong language but tiny move → exaggerated
         label = "exaggerated"
 
-    elif claimed != "neutral" and not raw.has_catalyst and abs_move < threshold_pct * 2:
-        # No catalyst backing a directional claim → exaggerated
+    elif (
+        claimed != "neutral"
+        and not raw.has_catalyst
+        and raw.news_headlines  # only penalize when news was actually found
+        and abs_move < threshold_pct * 2
+    ):
+        # News found but no catalyst backing a directional claim → exaggerated
         label = "exaggerated"
 
     elif claimed != "neutral" and claimed == actual and abs_move >= threshold_pct:
@@ -184,6 +191,7 @@ def label_claim(
 
     exaggeration_score = compute_exaggeration_score(
         claimed, actual, raw.price_change_pct, raw.has_catalyst, intensity,
+        news_available=bool(raw.news_headlines),
     )
 
     news_summary = raw.news_headlines[0] if raw.news_headlines else ""

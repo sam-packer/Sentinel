@@ -64,7 +64,11 @@ def classify_catalyst(headlines: list[str]) -> tuple[bool, str | None]:
 
 
 def _parse_article_age_hours(date_str: str, reference: datetime | None = None) -> float | None:
-    """Parse a date string and return age in hours from reference time."""
+    """Parse a date string and return absolute time distance in hours from reference time.
+
+    Returns the unsigned distance so articles both before and after the
+    reference are handled symmetrically.
+    """
     if not date_str:
         return None
     try:
@@ -75,7 +79,7 @@ def _parse_article_age_hours(date_str: str, reference: datetime | None = None) -
         if ref.tzinfo is None:
             ref = ref.replace(tzinfo=timezone.utc)
         delta = ref - parsed
-        return max(0, delta.total_seconds() / 3600)
+        return abs(delta.total_seconds() / 3600)
     except (ValueError, OverflowError):
         return None
 

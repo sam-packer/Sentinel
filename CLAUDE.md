@@ -1,19 +1,19 @@
 # Sentinel
 
-**Defense Stock Claim Analyzer** — classifies social media claims about defense stocks as exaggerated, accurate, or understated.
+**Defense Stock Claim Analyzer** — builds a labeled dataset of social media claims about defense stocks, classifying each as exaggerated, accurate, or understated based on what actually happened to the stock price.
 
 ## What It Does
 
-Sentinel scrapes tweets about defense stocks (LMT, RTX, NOC, etc.), fetches the actual price change and news catalysts, and labels each claim. It then trains ML classifiers and serves results through a Flask API for a SvelteKit frontend.
+Sentinel scrapes tweets about defense stocks (LMT, RTX, NOC, etc.), fetches the actual 24h price change and news catalysts, then labels each claim using rule-based heuristics. The labeled data is stored in PostgreSQL and served through a Flask API.
 
-## Architecture
+This is a **retrospective data collection pipeline**, not a real-time prediction system. Labeling requires the 24h price window to have elapsed. Tweets less than 25 hours old are skipped during enrichment.
 
-1. **Scrape**: Searches Twitter for defense ticker cashtags and company names via twscrape.
-2. **Enrich**: Fetches price at tweet time + 24h later (yfinance) and news around the tweet (yfinance + DuckDuckGo).
-3. **Label**: Rule-based labeling (exaggerated/accurate/understated) based on claimed vs actual direction + catalyst presence.
-4. **Features**: Extracts text features (intensity, defense-specific, specificity) and news features (catalyst type, headline sentiment, embeddings).
-5. **Models**: Naive baseline, classical (TF-IDF + LogReg/SVM), and neural (FinBERT + MiniLM fusion).
-6. **API**: Flask serves `/api/feed`, `/api/analyze`, `/api/stats`, `/api/feed/stream` (SSE).
+## Pipeline
+
+1. **Scrape**: Searches Twitter for defense ticker cashtags (`$LMT`) and quoted company names (`"Lockheed Martin"`) via twscrape. Supports `--since`/`--until` for time-windowed historical scraping.
+2. **Enrich**: Fetches price at tweet time + 24h later (yfinance) and news headlines around the tweet (yfinance + DuckDuckGo, ±48h window). Classifies news into catalyst types (contract > earnings > geopolitical > budget) by keyword matching.
+3. **Label**: Rule-based labeling — compares claimed direction (keyword/emoji matching) against actual 24h price direction. No NLP models involved, just string matching and hardcoded thresholds.
+4. **API**: Flask serves `/api/feed`, `/api/analyze`, `/api/stats`, `/api/feed/stream` (SSE).
 
 ## Quick Start
 
@@ -28,10 +28,10 @@ uv run serve
 
 ```
 uv run setup       # Init DB, sanity check
-uv run collect     # Scrape + label claims
+uv run collect     # Scrape + enrich + label claims
+uv run status      # Check background collection progress
+uv run stop        # Stop background collection
 uv run serve       # Start Flask API
-uv run train       # Train ML models
-uv run experiment  # Run news ablation
 ```
 
 ## Testing
@@ -46,21 +46,21 @@ Tests use mocks for external dependencies (Twitter, yfinance, LLM providers, Duc
 
 ## Key Files
 
-- `src/data/stocks.py` — Defense stock universe (ticker mapping)
-- `src/data/models.py` — RawClaim + LabeledClaim dataclasses
-- `src/data/labeler.py` — Claim labeling logic
-- `src/data/db.py` — PostgreSQL persistence
-- `src/scraper.py` — Twitter scraper (twscrape)
-- `src/price_fetcher.py` — yfinance price lookups
-- `src/news_fetcher.py` — News fetching + catalyst classification
-- `src/features/` — Text and news feature extraction
-- `src/models/` — Baseline, classical, neural classifiers
-- `src/api/` — Flask API (app factory + routes)
 - `src/cli.py` — Click CLI entry point
+- `src/collector.py` — Background collection engine with status tracking
+- `src/scraper.py` — Twitter scraper (twscrape, async)
+- `src/price_fetcher.py` — yfinance price lookups with caching
+- `src/news_fetcher.py` — News fetching + catalyst classification
+- `src/data/labeler.py` — Rule-based claim labeling (keyword matching + thresholds)
+- `src/data/models.py` — RawClaim + LabeledClaim dataclasses
+- `src/data/stocks.py` — Defense stock universe (ticker mapping + resolution)
+- `src/data/db.py` — PostgreSQL persistence
+- `src/api/` — Flask API (app factory + routes)
+- `src/config.py` — YAML + env configuration
 
 ## Configuration
 
-- **`config.yaml`**: App settings (LLM provider, labeling thresholds, model params)
+- **`config.yaml`**: App settings (LLM provider, labeling thresholds, scraping options)
 - **`.env`**: Secrets (`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `DATABASE_URL`)
 
 ## Package Manager

@@ -95,6 +95,46 @@ class TestLabelClaim:
         assert labeled.news_summary == "RTX wins $5B missile contract"
 
 
+class TestNoNewsPenalty:
+    """No-catalyst penalty should only apply when news was actually found."""
+
+    def test_no_news_directional_claim_not_penalized(self):
+        """Empty news_headlines means fetch failed — should NOT label as exaggerated."""
+        raw = make_raw_claim(
+            text="$LMT is surging! 🚀",
+            price_change_pct=3.0,
+            price_at_tweet=450.0,
+            price_24h_later=463.5,
+            news_headlines=[],
+            has_catalyst=False,
+        )
+        labeled = label_claim(raw)
+        assert labeled.label == "accurate"
+
+    def test_news_found_no_catalyst_still_penalized(self):
+        """Non-empty headlines but no catalyst keywords should still be penalized."""
+        raw = make_raw_claim(
+            text="$LMT is surging! 🚀",
+            price_change_pct=3.0,
+            price_at_tweet=450.0,
+            price_24h_later=463.5,
+            news_headlines=["Stock market closes higher on broad gains"],
+            has_catalyst=False,
+        )
+        labeled = label_claim(raw)
+        assert labeled.label == "exaggerated"
+
+    def test_exaggeration_score_respects_news_available(self):
+        """compute_exaggeration_score should not penalize when news_available=False."""
+        score_with_news = compute_exaggeration_score(
+            "up", "up", 1.5, False, 0.3, news_available=True,
+        )
+        score_no_news = compute_exaggeration_score(
+            "up", "up", 1.5, False, 0.3, news_available=False,
+        )
+        assert score_no_news <= score_with_news
+
+
 class TestExaggerationScore:
     def test_direction_mismatch_high_score(self):
         score = compute_exaggeration_score("up", "down", -5.0, True, 0.5)

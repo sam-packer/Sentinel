@@ -22,14 +22,7 @@ dependencies = [
     "flask",
     "flask-cors",
     "psycopg[binary]",
-    "scikit-learn",
-    "transformers",
-    "torch",
-    "sentence-transformers",
-    "matplotlib",
     "click",
-    "vaderSentiment",
-    "joblib",
     "gunicorn",
 ]
 
@@ -39,11 +32,6 @@ collect = "src.cli:collect"
 status = "src.cli:status"
 stop = "src.cli:stop"
 serve = "src.cli:serve"
-train = "src.cli:train"
-experiment = "src.cli:experiment"
-
-[project.optional-dependencies]
-local-embeddings = ["sentence-transformers"]
 
 [dependency-groups]
 dev = [

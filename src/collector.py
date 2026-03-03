@@ -12,7 +12,7 @@ import signal
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import config
@@ -175,6 +175,31 @@ async def run_collection(
         logger.info(f"Scraped {len(claims)} raw claims")
 
         # 2. Enrich + label
+        # Filter out tweets that are too recent for the 24h price window.
+        # Without the full window, the labeler can't compute the actual price
+        # move and labels will be unreliable.
+        now = datetime.now(tz=timezone.utc)
+        min_age = timedelta(hours=25)  # 24h + 1h buffer for market close
+        mature_claims = []
+        skipped_recent = 0
+        for claim in claims:
+            tweet_time = claim.created_at
+            if tweet_time.tzinfo is None:
+                tweet_time = tweet_time.replace(tzinfo=timezone.utc)
+            if now - tweet_time < min_age:
+                skipped_recent += 1
+            else:
+                mature_claims.append(claim)
+
+        if skipped_recent > 0:
+            logger.warning(
+                f"Skipped {skipped_recent} tweets less than 25h old — "
+                f"the 24h price window hasn't elapsed yet so labels would be unreliable. "
+                f"Proceeding with {len(mature_claims)} mature tweets."
+            )
+        claims = mature_claims
+        status.scraped = len(claims)
+
         pf = PriceFetcher()
 
         db = None

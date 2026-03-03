@@ -123,13 +123,17 @@ def setup():
     click.echo("  uv run serve            # Start API server")
 
 
-def _parse_time(value: str) -> datetime:
-    """Parse a time string into a datetime.
+def _parse_time(value: str, tz: timezone | ZoneInfo = ET) -> datetime:
+    """Parse a time string into a timezone-aware datetime.
+
+    Relative durations are computed from the current time (always UTC-based).
+    Absolute times without an explicit offset are interpreted in ``tz``
+    (defaults to US Eastern).
 
     Supports:
       - Relative durations: "30m", "1h", "2d", "1w" (subtracted from now)
-      - ISO datetime: "2026-03-02T09:30:00"
-      - Date only: "2026-03-02" (midnight UTC)
+      - ISO datetime: "2026-03-02T09:30:00" (interpreted as ``tz``)
+      - Date only: "2026-03-02" (midnight in ``tz``)
       - "now" keyword
     """
     value = value.strip()
@@ -146,12 +150,12 @@ def _parse_time(value: str) -> datetime:
                  "d": timedelta(days=amount), "w": timedelta(weeks=amount)}[unit]
         return datetime.now(timezone.utc) - delta
 
-    # ISO datetime or date-only
+    # ISO datetime or date-only — bare values are interpreted in the given tz
     for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
         try:
             dt = datetime.strptime(value, fmt)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=tz)
             return dt
         except ValueError:
             continue
@@ -162,15 +166,24 @@ def _parse_time(value: str) -> datetime:
     )
 
 
+def _format_time(dt: datetime) -> str:
+    """Format a datetime for display, showing the timezone abbreviation."""
+    # Convert to ET for display so times are always shown in market time
+    et_dt = dt.astimezone(ET)
+    # %Z gives 'EST' or 'EDT' depending on DST
+    return et_dt.strftime("%Y-%m-%d %H:%M %Z")
+
+
 @click.command()
 @click.option("-n", "n_per_ticker", default=50, help="Tweets per ticker")
 @click.option("--tickers", default=None, help="Comma-separated tickers (default: all)")
 @click.option("--since", "since_str", default=None,
-              help="Only scrape tweets after this time. "
-                   "Relative (1h, 30m, 2d) or ISO (2026-03-02T09:30)")
+              help="Only scrape tweets after this time. Tweets <25h old are skipped "
+                   "during labeling (24h price window hasn't elapsed). "
+                   "Relative (1h, 30m, 2d) or ISO in ET (2026-03-02T09:30)")
 @click.option("--until", "until_str", default=None,
               help="Only scrape tweets before this time. "
-                   "Relative (1h, 30m, 2d) or ISO (2026-03-02T09:30)")
+                   "Relative (1h, 30m, 2d) or ISO in ET (2026-03-02T09:30)")
 @click.option("--market-open", "market_open_date", default=None,
               help="Scrape tweets around market open (9:00-10:30 AM ET) on DATE. "
                    "Use 'today', 'yesterday', or YYYY-MM-DD.")
@@ -216,7 +229,7 @@ def collect(
         # Market open window: 9:00 AM - 10:30 AM ET
         since = datetime(target.year, target.month, target.day, 9, 0, tzinfo=ET)
         until = datetime(target.year, target.month, target.day, 10, 30, tzinfo=ET)
-        click.echo(f"Market-open mode: {target} 9:00-10:30 AM ET")
+        click.echo(f"Market-open mode: {_format_time(since)} to {_format_time(until)}")
 
     if since_str:
         since = _parse_time(since_str)
@@ -274,9 +287,9 @@ def collect(
     if not _daemonized:
         parts = [f"Collecting claims for {len(ticker_list)} tickers, {n_per_ticker} each"]
         if since:
-            parts.append(f"since {since.isoformat()}")
+            parts.append(f"since {_format_time(since)}")
         if until:
-            parts.append(f"until {until.isoformat()}")
+            parts.append(f"until {_format_time(until)}")
         click.echo(" ".join(parts))
 
     asyncio.run(run_collection(
@@ -437,35 +450,3 @@ def serve(host: str, port: int | None, workers: int, dev: bool):
         ], check=True)
 
 
-@click.command()
-@click.option(
-    "--model", "model_name",
-    type=click.Choice(["all", "baseline", "classical", "neural"]),
-    default="all",
-    help="Which model to train",
-)
-def train(model_name: str):
-    """Train ML models on labeled data."""
-    _init()
-
-    click.echo(f"Training: {model_name}")
-    click.echo("Note: Requires labeled data in PostgreSQL. Run 'collect' first.")
-
-    if model_name in ("all", "baseline"):
-        click.echo("Baseline: majority class classifier (trained at prediction time)")
-
-    if model_name in ("all", "classical"):
-        click.echo("Classical: TF-IDF + LogReg/SVM (requires labeled data)")
-
-    if model_name in ("all", "neural"):
-        click.echo("Neural: FinBERT + MiniLM fusion (requires labeled data + GPU recommended)")
-
-
-@click.command()
-def experiment():
-    """Run the news feature ablation experiment."""
-    _init()
-
-    click.echo("Running news ablation experiment...")
-    click.echo("Note: Requires labeled data. Run 'collect' first to build dataset.")
-    click.echo("Results will be saved to data/outputs/news_ablation.png")
