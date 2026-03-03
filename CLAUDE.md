@@ -20,7 +20,7 @@ Sentinel scrapes tweets about defense stocks (LMT, RTX, NOC, etc.), fetches the 
 ```bash
 uv sync
 uv run setup
-uv run collect --n 100
+uv run collect -n 100
 uv run serve
 ```
 

@@ -92,7 +92,7 @@ Proxies are assigned to accounts in round-robin order.
 uv run setup
 
 # Scrape and label claims
-uv run collect --n 100
+uv run collect -n 100
 
 # Start the API server (gunicorn, 4 workers)
 uv run serve
@@ -102,22 +102,22 @@ The API will be available at `http://localhost:5000`.
 
 ## CLI Reference
 
-| Command                             | Description                                                 |
-|-------------------------------------|-------------------------------------------------------------|
-| `setup`                             | Create directories, init DB schema, sanity check labeler    |
-| `collect`                           | Scrape tweets, fetch prices/news, label claims, store in DB |
-| `collect --n 100 --tickers LMT,RTX` | Collect for specific tickers                                |
-| `collect --background`              | Run collection in the background                            |
-| `status`                            | Check background collection progress                        |
-| `stop`                              | Stop a background collection                                |
-| `serve`                             | Start API server via gunicorn                               |
-| `serve --dev`                       | Start Flask dev server (hot reload)                         |
-| `serve --port 8080 --workers 8`     | Custom port and worker count                                |
-| `train`                             | Train ML models on collected data                           |
-| `train --model classical`           | Train only the classical model                              |
-| `experiment`                        | Run news feature ablation experiment                        |
+| Command                            | Description                                                 |
+|------------------------------------|-------------------------------------------------------------|
+| `setup`                            | Create directories, init DB schema, sanity check labeler    |
+| `collect`                          | Scrape tweets, fetch prices/news, label claims, store in DB |
+| `collect -n 100 --tickers LMT,RTX` | Collect for specific tickers                                |
+| `collect --background`             | Run collection in the background                            |
+| `status`                           | Check background collection progress                        |
+| `stop`                             | Stop a background collection                                |
+| `serve`                            | Start API server via gunicorn                               |
+| `serve --dev`                      | Start Flask dev server (hot reload)                         |
+| `serve --port 8080 --workers 8`    | Custom port and worker count                                |
+| `train`                            | Train ML models on collected data                           |
+| `train --model classical`          | Train only the classical model                              |
+| `experiment`                       | Run news feature ablation experiment                        |
 
-All commands are run with `uv run`, e.g. `uv run setup`, `uv run collect --n 100`.
+All commands are run with `uv run`, e.g. `uv run setup`, `uv run collect -n 100`.
 
 ## API
 

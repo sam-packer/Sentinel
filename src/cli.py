@@ -114,7 +114,7 @@ def setup():
 
 
 @click.command()
-@click.option("--n", "n_per_ticker", default=50, help="Tweets per ticker")
+@click.option("-n", "n_per_ticker", default=50, help="Tweets per ticker")
 @click.option("--tickers", default=None, help="Comma-separated tickers (default: all)")
 @click.option("--background", is_flag=True, help="Run in background")
 @click.option("--_daemonized", is_flag=True, hidden=True)
@@ -139,7 +139,7 @@ def collect(n_per_ticker: int, tickers: str | None, background: bool, _daemonize
         if collect_bin is None:
             collect_bin = str(Path(sys.executable).parent / "collect")
 
-        cmd = [collect_bin, "--n", str(n_per_ticker), "--_daemonized"]
+        cmd = [collect_bin, "-n", str(n_per_ticker), "--_daemonized"]
         if tickers:
             cmd.extend(["--tickers", tickers])
 
