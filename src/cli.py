@@ -442,7 +442,7 @@ def serve(host: str, port: int | None, workers: int, dev: bool):
         click.echo(f"Starting Sentinel API via gunicorn on {host}:{port} ({workers} workers)")
         subprocess.run([
             sys.executable, "-m", "gunicorn",
-            "--factory", "src.api.app:create_app",
+            "src.api.app:create_app()",
             "--bind", f"{host}:{port}",
             "--workers", str(workers),
             "--access-logfile", "-",
