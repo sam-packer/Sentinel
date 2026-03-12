@@ -49,15 +49,15 @@ Four catalyst types are checked in priority order (first match wins):
 
 4. Assigns a label:
 
-| Condition                                            | Label       |
-|------------------------------------------------------|-------------|
-| Claimed direction opposite of actual                 | exaggerated |
-| Directional claim but price moved less than 2%       | exaggerated |
-| Directional claim, no news catalyst, move under 4%   | exaggerated |
-| Direction matches, move at least 2%                  | accurate    |
-| Neutral tweet, price moved less than 2%              | accurate    |
-| Neutral tweet, price moved 5% or more               | understated |
-| Price moved 10%+ but tweet intensity below 0.3       | understated |
+| Condition                                          | Label       |
+|----------------------------------------------------|-------------|
+| Claimed direction opposite of actual               | exaggerated |
+| Directional claim but price moved less than 2%     | exaggerated |
+| Directional claim, no news catalyst, move under 4% | exaggerated |
+| Direction matches, move at least 2%                | accurate    |
+| Neutral tweet, price moved less than 2%            | accurate    |
+| Neutral tweet, price moved 5% or more              | understated |
+| Price moved 10%+ but tweet intensity below 0.3     | understated |
 
 5. Computes an exaggeration score from 0.0 (spot on) to 1.0 (completely wrong). Direction mismatches start at 0.7;
    loud language on a flat stock starts at 0.4; matching calls on real moves score near 0.0.
@@ -149,52 +149,55 @@ uv run serve
 
 ## CLI
 
-| Command                             | Description                             |
-|-------------------------------------|-----------------------------------------|
-| `setup`                             | Init DB schema, sanity check labeler    |
-| `collect`                           | Scrape, enrich, label, store            |
-| `collect -n 100 --tickers LMT,RTX`  | Specific tickers                        |
-| `collect --background`              | Run in background                       |
-| `collect --status`                  | Check background collection progress    |
-| `collect --stop`                    | Stop background collection              |
-| `collect --since 2d`                | Only tweets from the last 2 days        |
-| `collect --market-open yesterday`   | Tweets around yesterday's open (9:00-10:30 AM ET) |
-| `enrich`                            | Re-enrich existing claims with fresh price/news data |
-| `enrich --unlabeled`                | Only enrich claims that haven't been labeled yet |
-| `enrich --background`               | Run enrichment in background            |
-| `enrich --status`                   | Check background enrichment progress    |
-| `enrich --stop`                     | Stop background enrichment              |
-| `serve`                             | Start API (gunicorn, 4 workers)         |
-| `serve --dev`                       | Flask dev server with hot reload        |
+| Command                            | Description                                      |
+|------------------------------------|--------------------------------------------------|
+| `setup`                            | Init DB schema, sanity check labeler             |
+| `collect`                          | Scrape yesterday's tweets, enrich, label, store  |
+| `collect --days 7`                 | Scrape last 7 days, one day at a time            |
+| `collect -n 100 --tickers LMT,RTX` | Specific tickers, 100 per ticker                 |
+| `collect --background`             | Run in background                                |
+| `collect --status`                 | Check background collection progress             |
+| `collect --stop`                   | Stop background collection                       |
+| `enrich`                           | Re-enrich all existing claims                    |
+| `enrich --days 7`                  | Re-enrich claims from the last 7 days            |
+| `enrich --unlabeled`               | Only enrich claims that haven't been labeled yet |
+| `enrich --background`              | Run enrichment in background                     |
+| `enrich --status`                  | Check background enrichment progress             |
+| `enrich --stop`                    | Stop background enrichment                       |
+| `serve`                            | Start API (gunicorn, 4 workers)                  |
+| `serve --dev`                      | Flask dev server with hot reload                 |
 
 All commands use `uv run`.
 
-### Time filtering
+### Collecting tweets
 
-`--since`, `--until`, and `--market-open` control which tweets are scraped. Absolute times are interpreted as US
-Eastern (ET). Relative durations (`1h`, `30m`, `2d`, `1w`) are subtracted from now. `--market-open` accepts `today`,
-`yesterday`, or `YYYY-MM-DD` and sets a 9:00-10:30 AM ET window.
+`collect` scrapes tweets, enriches them with price/news data, labels them, and stores them in the database.
 
-Since labeling needs the 24h price outcome, tweets under 25 hours old are skipped during enrichment.
+The `--days` flag controls how far back to scrape. The time window always ends 25 hours ago so that every tweet has a
+complete 24-hour price window for enrichment. When `--days` is greater than 1, each day is scraped independently so
+you get even temporal distribution instead of Twitter biasing toward popular/recent tweets.
+
+The `-n` flag sets tweets per ticker per day. With 15 defense tickers, `-n 50` gives ~750 tweets per day.
 
 ```bash
-uv run collect -n 50 --since 2026-03-02T09:00 --until 2026-03-02T11:00
-uv run collect -n 100 --market-open yesterday
-uv run collect -n 20 --since 30m --tickers LMT
+uv run collect                        # yesterday, 50/ticker
+uv run collect --days 7               # last 7 days, 50/ticker/day
+uv run collect --days 7 -n 70         # last 7 days, ~1000 tweets/day
+uv run collect --tickers LMT,RTX      # specific tickers only
 ```
 
 ## API
 
 Served via gunicorn at `/api`.
 
-| Method | Endpoint           | Description                              |
-|--------|--------------------|------------------------------------------|
-| `POST` | `/api/analyze`     | Label a tweet using current price data   |
-| `GET`  | `/api/feed`        | Paginated labeled claims, newest first   |
-| `GET`  | `/api/feed/stream` | SSE stream of new claims                 |
-| `GET`  | `/api/stats`       | Label distribution, top tickers          |
-| `GET`  | `/api/stocks`      | Defense stock universe                   |
-| `GET`  | `/api/health`      | DB connectivity check                    |
+| Method | Endpoint           | Description                            |
+|--------|--------------------|----------------------------------------|
+| `POST` | `/api/analyze`     | Label a tweet using current price data |
+| `GET`  | `/api/feed`        | Paginated labeled claims, newest first |
+| `GET`  | `/api/feed/stream` | SSE stream of new claims               |
+| `GET`  | `/api/stats`       | Label distribution, top tickers        |
+| `GET`  | `/api/stocks`      | Defense stock universe                 |
+| `GET`  | `/api/health`      | DB connectivity check                  |
 
 `/api/feed` takes `limit` (default 50, max 200), `offset`, and optional `label` filter.
 
@@ -230,7 +233,7 @@ app:
 
 twitter:
   db_path: accounts.db
-  proxies: []
+  proxies: [ ]
 
 llm:
   provider: google
@@ -256,42 +259,42 @@ returned by the API.
 
 **From the tweet:**
 
-| Field | Description |
-|-------|-------------|
-| `tweet_id` | Twitter's unique ID. Primary key, used for deduplication. |
-| `text` | Full tweet text. |
-| `username` | Twitter handle that posted it. |
-| `created_at` | When the tweet was posted. Everything else is anchored to this timestamp. |
-| `likes` | Like count at scrape time. Stored but not used in labeling. |
-| `retweets` | Retweet count at scrape time. Stored but not used in labeling. |
-| `ticker` | Resolved stock ticker (e.g. "LMT"). If a tweet mentions multiple defense stocks, the scraper picks the most specific match. |
-| `company_name` | Full company name (e.g. "Lockheed Martin"), looked up from the ticker. |
+| Field          | Description                                                                                                                 |
+|----------------|-----------------------------------------------------------------------------------------------------------------------------|
+| `tweet_id`     | Twitter's unique ID. Primary key, used for deduplication.                                                                   |
+| `text`         | Full tweet text.                                                                                                            |
+| `username`     | Twitter handle that posted it.                                                                                              |
+| `created_at`   | When the tweet was posted. Everything else is anchored to this timestamp.                                                   |
+| `likes`        | Like count at scrape time. Stored but not used in labeling.                                                                 |
+| `retweets`     | Retweet count at scrape time. Stored but not used in labeling.                                                              |
+| `ticker`       | Resolved stock ticker (e.g. "LMT"). If a tweet mentions multiple defense stocks, the scraper picks the most specific match. |
+| `company_name` | Full company name (e.g. "Lockheed Martin"), looked up from the ticker.                                                      |
 
 **From price enrichment:**
 
-| Field | Description |
-|-------|-------------|
-| `price_at_tweet` | Stock price around when the tweet was posted, averaged over a 30-minute window. |
-| `price_24h_later` | Stock price ~24 hours later. Uses the first available trading candle at or after the 24h mark, so a Friday tweet gets Monday's price instead of Friday's close again. |
-| `price_change_pct` | Percentage change between those two prices: `((price_24h_later - price_at_tweet) / price_at_tweet) * 100`. |
+| Field              | Description                                                                                                                                                           |
+|--------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `price_at_tweet`   | Stock price around when the tweet was posted, averaged over a 30-minute window.                                                                                       |
+| `price_24h_later`  | Stock price ~24 hours later. Uses the first available trading candle at or after the 24h mark, so a Friday tweet gets Monday's price instead of Friday's close again. |
+| `price_change_pct` | Percentage change between those two prices: `((price_24h_later - price_at_tweet) / price_at_tweet) * 100`.                                                            |
 
 **From news enrichment:**
 
-| Field | Description |
-|-------|-------------|
+| Field            | Description                                                                                                                                     |
+|------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
 | `news_headlines` | JSON array of article titles found within 48 hours before or after the tweet (from yfinance and DuckDuckGo, deduplicated by URL). Can be empty. |
-| `has_catalyst` | True if any headline matched a catalyst keyword category. |
-| `catalyst_type` | Which category matched first in priority order: `contract`, `earnings`, `geopolitical`, `budget`. Null if nothing matched or no news was found. |
+| `has_catalyst`   | True if any headline matched a catalyst keyword category.                                                                                       |
+| `catalyst_type`  | Which category matched first in priority order: `contract`, `earnings`, `geopolitical`, `budget`. Null if nothing matched or no news was found. |
 
 **From labeling:**
 
-| Field | Description |
-|-------|-------------|
-| `claimed_direction` | What the tweet predicted, from keyword/emoji matching. "up" (bullish language like "moon", "surge", rocket emoji), "down" (bearish like "crash", "dump"), or "neutral" (no signal or conflicting signals). |
-| `actual_direction` | What the stock actually did. Above +0.5% = "up", below -0.5% = "down", otherwise "neutral". |
-| `label` | Final verdict: "exaggerated" (wrong or overblown), "accurate" (matched reality), or "understated" (underplayed a real move). |
-| `exaggeration_score` | 0.0 (nailed it) to 1.0 (completely wrong). Direction mismatches start at 0.7, hype on a flat stock starts at 0.4, correct calls on real moves score near 0.0. More granular than the three-bucket label. |
-| `news_summary` | First headline from `news_headlines`, used for display. Empty if no news found. |
+| Field                | Description                                                                                                                                                                                                |
+|----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `claimed_direction`  | What the tweet predicted, from keyword/emoji matching. "up" (bullish language like "moon", "surge", rocket emoji), "down" (bearish like "crash", "dump"), or "neutral" (no signal or conflicting signals). |
+| `actual_direction`   | What the stock actually did. Above +0.5% = "up", below -0.5% = "down", otherwise "neutral".                                                                                                                |
+| `label`              | Final verdict: "exaggerated" (wrong or overblown), "accurate" (matched reality), or "understated" (underplayed a real move).                                                                               |
+| `exaggeration_score` | 0.0 (nailed it) to 1.0 (completely wrong). Direction mismatches start at 0.7, hype on a flat stock starts at 0.4, correct calls on real moves score near 0.0. More granular than the three-bucket label.   |
+| `news_summary`       | First headline from `news_headlines`, used for display. Empty if no news found.                                                                                                                            |
 
 The intensity score (0-1, based on exclamation marks, caps, emoji, superlatives like "insane" or "massive")
 feeds into the exaggeration score but is not stored separately.
@@ -329,9 +332,9 @@ sudo systemctl enable --now sentinel.service
 
 ### Environment variables
 
-| Variable          | Required        | Description                        |
-|-------------------|-----------------|------------------------------------|
-| `DATABASE_URL`    | Yes             | PostgreSQL connection string       |
-| `OPENAI_API_KEY`  | If using OpenAI | For analysis explanations          |
-| `GOOGLE_API_KEY`  | If using Google | For analysis explanations          |
-| `TWITTER_PROXIES` | No              | Comma-separated proxy list         |
+| Variable          | Required        | Description                  |
+|-------------------|-----------------|------------------------------|
+| `DATABASE_URL`    | Yes             | PostgreSQL connection string |
+| `OPENAI_API_KEY`  | If using OpenAI | For analysis explanations    |
+| `GOOGLE_API_KEY`  | If using Google | For analysis explanations    |
+| `TWITTER_PROXIES` | No              | Comma-separated proxy list   |

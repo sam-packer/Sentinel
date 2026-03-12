@@ -19,7 +19,6 @@ Usage:
 import asyncio
 import logging
 import os
-import re
 import signal
 import sys
 from datetime import datetime, timedelta, timezone
@@ -156,53 +155,6 @@ def _stop_background(name: str) -> None:
     click.echo(f"{name.title()} stopped.")
 
 
-# ---------------------------------------------------------------------------
-# Time parsing
-# ---------------------------------------------------------------------------
-
-def _parse_time(value: str, tz: timezone | ZoneInfo = ET) -> datetime:
-    """Parse a time string into a timezone-aware datetime.
-
-    Relative durations are computed from the current time (always UTC-based).
-    Absolute times without an explicit offset are interpreted in ``tz``
-    (defaults to US Eastern).
-
-    Supports:
-      - Relative durations: "30m", "1h", "2d", "1w" (subtracted from now)
-      - ISO datetime: "2026-03-02T09:30:00" (interpreted as ``tz``)
-      - Date only: "2026-03-02" (midnight in ``tz``)
-      - "now" keyword
-    """
-    value = value.strip()
-
-    if value.lower() == "now":
-        return datetime.now(timezone.utc)
-
-    # Relative duration: e.g. "30m", "2h", "1d", "1w"
-    match = re.fullmatch(r"(\d+)\s*([mhdw])", value, re.IGNORECASE)
-    if match:
-        amount = int(match.group(1))
-        unit = match.group(2).lower()
-        delta = {"m": timedelta(minutes=amount), "h": timedelta(hours=amount),
-                 "d": timedelta(days=amount), "w": timedelta(weeks=amount)}[unit]
-        return datetime.now(timezone.utc) - delta
-
-    # ISO datetime or date-only — bare values are interpreted in the given tz
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
-        try:
-            dt = datetime.strptime(value, fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=tz)
-            return dt
-        except ValueError:
-            continue
-
-    raise click.BadParameter(
-        f"Cannot parse '{value}'. Use relative (e.g. 1h, 30m, 2d) "
-        f"or ISO format (e.g. 2026-03-02, 2026-03-02T09:30)."
-    )
-
-
 def _format_time(dt: datetime) -> str:
     """Format a datetime for display, showing the timezone abbreviation."""
     et_dt = dt.astimezone(ET)
@@ -297,28 +249,19 @@ def setup():
 # ---------------------------------------------------------------------------
 
 @click.command()
-@click.option("-n", "n_per_ticker", default=50, help="Tweets per ticker")
+@click.option("-n", "n_per_ticker", default=50, help="Tweets per ticker per day")
+@click.option("--days", default=1, type=int,
+              help="Number of days to scrape (default: 1). Scrapes each day separately "
+                   "for even temporal distribution. Ends 25h ago so all tweets can be enriched.")
 @click.option("--tickers", default=None, help="Comma-separated tickers (default: all)")
-@click.option("--since", "since_str", default=None,
-              help="Only scrape tweets after this time. Tweets <25h old are skipped "
-                   "during labeling (24h price window hasn't elapsed). "
-                   "Relative (1h, 30m, 2d) or ISO in ET (2026-03-02T09:30)")
-@click.option("--until", "until_str", default=None,
-              help="Only scrape tweets before this time. "
-                   "Relative (1h, 30m, 2d) or ISO in ET (2026-03-02T09:30)")
-@click.option("--market-open", "market_open_date", default=None,
-              help="Scrape tweets around market open (9:00-10:30 AM ET) on DATE. "
-                   "Use 'today', 'yesterday', or YYYY-MM-DD.")
 @click.option("--background", is_flag=True, help="Run in background")
 @click.option("--status", "show_status", is_flag=True, help="Check background collection progress")
 @click.option("--stop", "do_stop", is_flag=True, help="Stop background collection")
 @click.option("--_daemonized", is_flag=True, hidden=True)
 def collect(
     n_per_ticker: int,
+    days: int,
     tickers: str | None,
-    since_str: str | None,
-    until_str: str | None,
-    market_open_date: str | None,
     background: bool,
     show_status: bool,
     do_stop: bool,
@@ -335,42 +278,14 @@ def collect(
         _stop_background("collect")
         return
 
-    # Parse time window
-    since = None
-    until = None
-
-    if market_open_date and (since_str or until_str):
-        click.echo("Error: --market-open cannot be combined with --since/--until.", err=True)
+    if days < 1:
+        click.echo("Error: --days must be at least 1.", err=True)
         sys.exit(1)
 
-    if market_open_date:
-        mo = market_open_date.strip().lower()
-        if mo == "today":
-            target = datetime.now(ET).date()
-        elif mo == "yesterday":
-            target = (datetime.now(ET) - timedelta(days=1)).date()
-        else:
-            try:
-                target = datetime.strptime(mo, "%Y-%m-%d").date()
-            except ValueError:
-                click.echo(
-                    f"Error: Cannot parse date '{market_open_date}'. "
-                    "Use 'today', 'yesterday', or YYYY-MM-DD.", err=True
-                )
-                sys.exit(1)
-
-        since = datetime(target.year, target.month, target.day, 9, 0, tzinfo=ET)
-        until = datetime(target.year, target.month, target.day, 10, 30, tzinfo=ET)
-        click.echo(f"Market-open mode: {_format_time(since)} to {_format_time(until)}")
-
-    if since_str:
-        since = _parse_time(since_str)
-    if until_str:
-        until = _parse_time(until_str)
-
-    if since and until and since >= until:
-        click.echo("Error: --since must be before --until.", err=True)
-        sys.exit(1)
+    # Time window: from N days ago until 25h ago (so all tweets can be enriched)
+    until = datetime.now(timezone.utc) - timedelta(hours=25)
+    since = until - timedelta(days=days)
+    daily = days > 1
 
     from .collector import is_running
 
@@ -389,15 +304,9 @@ def collect(
         if collect_bin is None:
             collect_bin = str(Path(sys.executable).parent / "collect")
 
-        cmd = [collect_bin, "-n", str(n_per_ticker), "--_daemonized"]
+        cmd = [collect_bin, "-n", str(n_per_ticker), "--days", str(days), "--_daemonized"]
         if tickers:
             cmd.extend(["--tickers", tickers])
-        if since_str:
-            cmd.extend(["--since", since_str])
-        if until_str:
-            cmd.extend(["--until", until_str])
-        if market_open_date:
-            cmd.extend(["--market-open", market_open_date])
 
         proc = subprocess.Popen(
             cmd,
@@ -417,11 +326,8 @@ def collect(
     ticker_list = tickers.split(",") if tickers else get_public_tickers()
 
     if not _daemonized:
-        parts = [f"Collecting claims for {len(ticker_list)} tickers, {n_per_ticker} each"]
-        if since:
-            parts.append(f"since {_format_time(since)}")
-        if until:
-            parts.append(f"until {_format_time(until)}")
+        parts = [f"Collecting {n_per_ticker}/ticker/day for {days} day{'s' if days != 1 else ''}"]
+        parts.append(f"({_format_time(since)} to {_format_time(until)})")
         click.echo(" ".join(parts))
 
     asyncio.run(run_collection(
@@ -430,6 +336,7 @@ def collect(
         database_url=config.database.url,
         since=since,
         until=until,
+        daily=daily,
     ))
 
     if not _daemonized:
@@ -444,12 +351,8 @@ def collect(
 
 @click.command()
 @click.option("--tickers", default=None, help="Comma-separated tickers (default: all)")
-@click.option("--since", "since_str", default=None,
-              help="Only enrich claims created after this time. "
-                   "Relative (1h, 30m, 2d) or ISO in ET (2026-03-02T09:30)")
-@click.option("--until", "until_str", default=None,
-              help="Only enrich claims created before this time. "
-                   "Relative (1h, 30m, 2d) or ISO in ET (2026-03-02T09:30)")
+@click.option("--days", default=None, type=int,
+              help="Only enrich claims from the last N days")
 @click.option("--unlabeled", is_flag=True, help="Only enrich claims that haven't been labeled yet")
 @click.option("--background", is_flag=True, help="Run in background")
 @click.option("--status", "show_status", is_flag=True, help="Check background enrichment progress")
@@ -457,8 +360,7 @@ def collect(
 @click.option("--_daemonized", is_flag=True, hidden=True)
 def enrich(
     tickers: str | None,
-    since_str: str | None,
-    until_str: str | None,
+    days: int | None,
     unlabeled: bool,
     background: bool,
     show_status: bool,
@@ -480,12 +382,11 @@ def enrich(
         click.echo("Error: DATABASE_URL not set. Enrich reads from the database.", err=True)
         sys.exit(1)
 
-    since = _parse_time(since_str) if since_str else None
-    until = _parse_time(until_str) if until_str else None
-
-    if since and until and since >= until:
-        click.echo("Error: --since must be before --until.", err=True)
-        sys.exit(1)
+    since = None
+    until = None
+    if days is not None:
+        until = datetime.now(timezone.utc)
+        since = until - timedelta(days=days)
 
     ticker_list = tickers.split(",") if tickers else None
 
@@ -509,10 +410,8 @@ def enrich(
         cmd = [enrich_bin, "--_daemonized"]
         if tickers:
             cmd.extend(["--tickers", tickers])
-        if since_str:
-            cmd.extend(["--since", since_str])
-        if until_str:
-            cmd.extend(["--until", until_str])
+        if days is not None:
+            cmd.extend(["--days", str(days)])
         if unlabeled:
             cmd.append("--unlabeled")
 
@@ -537,10 +436,8 @@ def enrich(
         parts.append("claims")
         if ticker_list:
             parts.append(f"for {', '.join(ticker_list)}")
-        if since:
-            parts.append(f"since {_format_time(since)}")
-        if until:
-            parts.append(f"until {_format_time(until)}")
+        if days:
+            parts.append(f"from last {days} day{'s' if days != 1 else ''}")
         click.echo(" ".join(parts))
 
     asyncio.run(run_enrichment(

@@ -222,6 +222,7 @@ async def run_collection(
     database_url: str | None,
     since: datetime | None = None,
     until: datetime | None = None,
+    daily: bool = False,
 ) -> None:
     """Run the full collection pipeline with status tracking."""
     from .data.db import SentinelDB
@@ -259,13 +260,49 @@ async def run_collection(
             status.scrape_tweets_found = total_claims
             _update_status(status, name)
 
-        claims = await scraper.scrape_defense_claims(
-            tickers=ticker_list,
-            limit_per_ticker=n_per_ticker,
-            on_ticker_done=_on_ticker_done,
-            since=since,
-            until=until,
-        )
+        if daily and since and until:
+            # Split into per-day windows for even temporal distribution
+            claims = []
+            seen_ids: set[int] = set()
+            day_start = since
+            day_count = 0
+            while day_start < until:
+                day_end = min(day_start + timedelta(days=1), until)
+                day_count += 1
+                logger.info(
+                    f"Daily scrape: day {day_count}, "
+                    f"{day_start.strftime('%Y-%m-%d')} to {day_end.strftime('%Y-%m-%d')}"
+                )
+                status.phase = f"scraping day {day_count} ({day_start.strftime('%Y-%m-%d')})"
+                _update_status(status, name)
+
+                day_claims = await scraper.scrape_defense_claims(
+                    tickers=ticker_list,
+                    limit_per_ticker=n_per_ticker,
+                    on_ticker_done=_on_ticker_done,
+                    since=day_start,
+                    until=day_end,
+                )
+                # Deduplicate across days
+                for c in day_claims:
+                    if c.tweet_id not in seen_ids:
+                        seen_ids.add(c.tweet_id)
+                        claims.append(c)
+
+                logger.info(
+                    f"Day {day_count} ({day_start.strftime('%Y-%m-%d')}): "
+                    f"{len(day_claims)} claims"
+                )
+                day_start = day_end
+        else:
+            claims = await scraper.scrape_defense_claims(
+                tickers=ticker_list,
+                limit_per_ticker=n_per_ticker,
+                on_ticker_done=_on_ticker_done,
+                since=since,
+                until=until,
+            )
+
         status.scraped = len(claims)
         status.scrape_tweets_found = len(claims)
         status.phase = "enriching"
