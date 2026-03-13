@@ -48,7 +48,6 @@ class BaseModel(ABC):
     @abstractmethod
     def name(self) -> str:
         """Short name for this model (e.g. 'baseline', 'classical', 'neural')."""
-        ...
 
     @abstractmethod
     def train(self, texts: list[str], labels: list[str]) -> dict:
@@ -61,7 +60,6 @@ class BaseModel(ABC):
         Returns:
             Dict of training metadata (e.g. class distribution, majority class).
         """
-        ...
 
     @abstractmethod
     def predict(self, text: str) -> str:
@@ -70,7 +68,6 @@ class BaseModel(ABC):
         Returns:
             'exaggerated' or 'accurate'.
         """
-        ...
 
     def predict_batch(self, texts: list[str]) -> list[str]:
         """Predict labels for multiple tweets. Override for efficiency."""
@@ -79,9 +76,7 @@ class BaseModel(ABC):
     @abstractmethod
     def save(self, directory: Path) -> None:
         """Save model to a directory."""
-        ...
 
     @abstractmethod
     def load(self, directory: Path) -> None:
         """Load model from a directory."""
-        ...

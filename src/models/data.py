@@ -40,7 +40,7 @@ def load_labeled_claims(db: SentinelDB) -> list[dict]:
     Returns a list of dicts with 'text' and 'label' keys (plus all
     other fields from the joined raw_claims/labeled_claims tables).
     """
-    conn = db._get_conn()
+    conn = db._get_conn()  # pylint: disable=protected-access
     query = """
         SELECT r.tweet_id, r.text, r.username, r.created_at,
                r.ticker, r.company_name, r.price_change_pct,

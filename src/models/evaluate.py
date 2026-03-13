@@ -6,8 +6,6 @@ Same evaluation code runs for all three model approaches so
 comparisons are apples-to-apples.
 """
 
-from collections import Counter
-
 
 def compute_metrics(predictions: list[str], labels: list[str]) -> dict:
     """Compute classification metrics for binary exaggerated/accurate.
