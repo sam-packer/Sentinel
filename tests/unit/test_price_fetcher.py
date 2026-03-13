@@ -1,9 +1,10 @@
 """Tests for defense stock price fetcher."""
 
-import pandas as pd
-import pytest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
+
+import pandas as pd
+import pytest
 
 from src.price_fetcher import PriceFetcher, PriceMove
 
@@ -35,7 +36,7 @@ class TestFetchCandles:
         mock_ticker.history.return_value = candles
         mock_yf.return_value = mock_ticker
 
-        hist, interval = pf._fetch_candles("LMT", dt - timedelta(days=1), dt + timedelta(days=1))
+        _hist, interval = pf._fetch_candles("LMT", dt - timedelta(days=1), dt + timedelta(days=1))  # pylint: disable=protected-access
         assert interval == "5m"
         # First call should be with interval="5m"
         mock_ticker.history.assert_called_once()
@@ -54,7 +55,7 @@ class TestFetchCandles:
         mock_ticker.history.return_value = candles
         mock_yf.return_value = mock_ticker
 
-        hist, interval = pf._fetch_candles("LMT", dt - timedelta(days=1), dt + timedelta(days=1))
+        _hist, interval = pf._fetch_candles("LMT", dt - timedelta(days=1), dt + timedelta(days=1))  # pylint: disable=protected-access
         assert interval == "1h"
 
     @patch("yfinance.Ticker")
@@ -69,7 +70,7 @@ class TestFetchCandles:
         mock_ticker.history.side_effect = [_make_empty_df(), candles_1h]
         mock_yf.return_value = mock_ticker
 
-        hist, interval = pf._fetch_candles("LMT", dt - timedelta(days=1), dt + timedelta(days=1))
+        hist, interval = pf._fetch_candles("LMT", dt - timedelta(days=1), dt + timedelta(days=1))  # pylint: disable=protected-access
         assert interval == "1h"
         assert not hist.empty
 
@@ -85,7 +86,7 @@ class TestFetchCandles:
         mock_ticker.history.side_effect = [_make_empty_df(), _make_empty_df(), candles_1d]
         mock_yf.return_value = mock_ticker
 
-        hist, interval = pf._fetch_candles("LMT", dt - timedelta(days=1), dt + timedelta(days=1))
+        hist, interval = pf._fetch_candles("LMT", dt - timedelta(days=1), dt + timedelta(days=1))  # pylint: disable=protected-access
         assert interval == "1d"
         assert not hist.empty
 
@@ -103,7 +104,7 @@ class TestAverageInWindow:
         prices = [449.0, 450.0, 451.0, 452.0, 450.5, 451.5]
         hist = _make_candle_df(timestamps, prices)
 
-        result = pf._average_in_window(hist, base, window_minutes=30)
+        result = pf._average_in_window(hist, base, window_minutes=30)  # pylint: disable=protected-access
         expected = sum(prices) / len(prices)
         assert result == pytest.approx(expected, rel=1e-4)
 
@@ -113,7 +114,7 @@ class TestAverageInWindow:
         base = datetime(2024, 6, 14, 14, 0, tzinfo=timezone.utc)
         hist = _make_candle_df([base], [450.0])
 
-        result = pf._average_in_window(hist, base, window_minutes=30)
+        result = pf._average_in_window(hist, base, window_minutes=30)  # pylint: disable=protected-access
         assert result == 450.0
 
     def test_fallback_to_nearest_when_window_empty(self):
@@ -124,7 +125,7 @@ class TestAverageInWindow:
         far_candle = target - timedelta(hours=2)
         hist = _make_candle_df([far_candle], [445.0])
 
-        result = pf._average_in_window(hist, target, window_minutes=30)
+        result = pf._average_in_window(hist, target, window_minutes=30)  # pylint: disable=protected-access
         assert result == 445.0
 
 
@@ -199,8 +200,8 @@ class TestGetPriceChange:
         friday_2pm = datetime(2024, 6, 14, 14, 0, tzinfo=timezone.utc)
         monday_2pm = datetime(2024, 6, 17, 14, 0, tzinfo=timezone.utc)
 
-        friday_candles = _make_candle_df([friday_2pm], [450.0])
-        monday_candles = _make_candle_df([monday_2pm], [460.0])
+        _make_candle_df([friday_2pm], [450.0])
+        _make_candle_df([monday_2pm], [460.0])
 
         def mock_fetch(ticker, start, end):
             # Return different candles based on the date range

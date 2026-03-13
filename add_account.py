@@ -104,7 +104,7 @@ async def add_account_with_cookies(
     api = API(db_path)
 
     # Delete existing accounts with same username or placeholder
-    print(f"\nRemoving any existing accounts...")
+    print("\nRemoving any existing accounts...")
     try:
         await api.pool.delete_accounts(["twitter_user", username])
     except Exception:
@@ -133,7 +133,7 @@ async def add_account_with_cookies(
             if acc.get("proxy"):
                 print(f"  Proxy: {acc['proxy'][:40]}...")
 
-    print(f"\nRun 'twscrape accounts' to verify.")
+    print("\nRun 'twscrape accounts' to verify.")
 
 
 async def main():

@@ -135,8 +135,8 @@ def mock_twscrape_api():
 def mock_ddgs():
     """Mock DuckDuckGo search."""
     with patch("ddgs.DDGS") as mock_ddgs_class:
-        mock_ddgs = MagicMock()
-        mock_ddgs.news.return_value = [
+        mock_ddgs_instance = MagicMock()
+        mock_ddgs_instance.news.return_value = [
             {
                 "title": "Lockheed Martin wins $2B radar contract",
                 "body": "Pentagon awards major radar system deal.",
@@ -145,7 +145,7 @@ def mock_ddgs():
                 "date": "2024-06-15",
             },
         ]
-        mock_ddgs_class.return_value = mock_ddgs
+        mock_ddgs_class.return_value = mock_ddgs_instance
         yield mock_ddgs_class
 
 

@@ -53,19 +53,19 @@ def _get_yaml_section(section: str, default=None):
     return _yaml_config.get(section, default or {})
 
 
-@dataclass
-class TwitterConfig:
-    """Twitter/X credentials and settings."""
-    db_path: str = field(default_factory=lambda: _get_yaml("twitter", "db_path", "accounts.db"))
-    proxies: list[str] = field(default_factory=lambda: _get_proxies())
-
-
 def _get_proxies() -> list[str]:
     """Get proxies from YAML or .env."""
     env_proxies = os.getenv("TWITTER_PROXIES", "")
     if env_proxies:
         return [p.strip() for p in env_proxies.split(",") if p.strip()]
     return _get_yaml("twitter", "proxies", []) or []
+
+
+@dataclass
+class TwitterConfig:
+    """Twitter/X credentials and settings."""
+    db_path: str = field(default_factory=lambda: _get_yaml("twitter", "db_path", "accounts.db"))
+    proxies: list[str] = field(default_factory=_get_proxies)
 
 
 @dataclass

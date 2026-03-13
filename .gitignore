@@ -35,6 +35,9 @@ config.yaml
 # Database files
 *.db
 
+# Jupyter
+.ipynb_checkpoints/
+
 # IDE
 .idea/
 .vscode/
@@ -58,3 +61,5 @@ Thumbs.db
 
 # Claude Code
 .claude
+
+/models

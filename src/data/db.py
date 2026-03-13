@@ -7,7 +7,7 @@ for the live feed and stats endpoints.
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 import psycopg
 
@@ -51,7 +51,7 @@ CREATE INDEX IF NOT EXISTS idx_raw_claims_created_at ON raw_claims(created_at DE
 """
 
 
-class SentinelDB:
+class SentinelDB:  # pylint: disable=no-member
     """PostgreSQL database interface for Sentinel."""
 
     def __init__(self, database_url: str):
@@ -161,8 +161,7 @@ class SentinelDB:
             d = dict(zip(columns, row))
             headlines = d.get("news_headlines", [])
             if isinstance(headlines, str):
-                import json as _json
-                headlines = _json.loads(headlines)
+                headlines = json.loads(headlines)
             claims.append(RawClaim(
                 tweet_id=d["tweet_id"],
                 text=d["text"],

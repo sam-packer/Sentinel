@@ -172,22 +172,91 @@ Labeling fields:
 | `exaggeration_score` | 0.0 (accurate) to 1.0 (completely wrong). More granular than the three-bucket label. |
 | `news_summary`       | First headline from `news_headlines`, used for display.                              |
 
-## CLI
+## Commands
 
-| Command                                   | Description                                     |
-|-------------------------------------------|-------------------------------------------------|
-| `uv run setup`                            | Init DB schema, sanity check labeler            |
-| `uv run collect`                          | Scrape yesterday's tweets, enrich, label, store |
-| `uv run collect --days 7`                 | Scrape last 7 days, one day at a time           |
-| `uv run collect -n 100 --tickers LMT,RTX` | Specific tickers, 100 per ticker                |
-| `uv run collect --background`             | Run in background                               |
-| `uv run collect --status`                 | Check background progress                       |
-| `uv run collect --stop`                   | Stop background collection                      |
-| `uv run enrich`                           | Re-enrich all existing claims                   |
-| `uv run enrich --days 7`                  | Re-enrich claims from the last 7 days           |
-| `uv run enrich --unlabeled`               | Only enrich unlabeled claims                    |
-| `uv run serve`                            | Start API (gunicorn, 4 workers)                 |
-| `uv run serve --dev`                      | Flask dev server with hot reload                |
+### setup
+
+Initializes the database schema, creates directories, and runs a sanity check against hardcoded example tweets to
+verify the labeler works.
+
+```bash
+uv run setup
+```
+
+### collect
+
+Scrapes tweets about defense stocks, enriches them with price and news data, labels them, and stores results in
+PostgreSQL. Each day is scraped independently for even temporal distribution. Only tweets older than 25 hours are
+processed so the 24h price window has elapsed.
+
+```bash
+uv run collect                              # yesterday's tweets, 50 per ticker
+uv run collect --days 7                     # last 7 days, one day at a time
+uv run collect -n 100 --days 30             # 100 per ticker per day, 30 days
+uv run collect --tickers LMT,RTX --days 3   # specific tickers only
+uv run collect --background                 # run in background
+uv run collect --status                     # check background progress
+uv run collect --stop                       # stop background collection
+```
+
+### enrich
+
+Re-enriches existing raw claims with fresh price and news data. Useful after changing labeling thresholds or if
+earlier enrichment runs failed due to market closures.
+
+```bash
+uv run enrich                     # re-enrich all claims
+uv run enrich --days 7            # only claims from the last 7 days
+uv run enrich --unlabeled         # only claims missing labels
+uv run enrich --tickers LMT,RTX   # specific tickers only
+uv run enrich --background        # run in background
+uv run enrich --status             # check background progress
+uv run enrich --stop               # stop background enrichment
+```
+
+### serve
+
+Starts the Flask API server. Uses gunicorn with 4 workers by default.
+
+```bash
+uv run serve                       # gunicorn on 0.0.0.0:5000
+uv run serve --port 8080           # custom port
+uv run serve --dev                 # Flask dev server with hot reload
+```
+
+### train
+
+Trains a model on labeled claims from the database. Loads data, splits into train/test sets with a fixed seed, trains,
+saves the model to `models/<name>/`, and prints test set metrics.
+
+```bash
+uv run train baseline              # train the majority-class baseline
+uv run train baseline --seed 99    # different random split
+uv run train baseline --test-size 0.3  # 30% test set instead of 20%
+```
+
+### evaluate
+
+Evaluates a previously trained model on the test set. Uses the same seed and split as training so the test data
+matches.
+
+```bash
+uv run evaluate baseline           # evaluate saved baseline model
+uv run evaluate baseline --seed 99 # must match the seed used during training
+```
+
+### predict
+
+Runs inference on tweet text using a trained model. No price or news data needed - this is how you classify a tweet
+before the 24h price window elapses.
+
+```bash
+uv run predict baseline '$LMT to the moon! 🚀🚀🚀'
+uv run predict classical 'RTX awarded massive Pentagon contract'
+uv run predict neural 'defense stocks looking weak here'
+```
+
+Also available as an API endpoint at `POST /api/predict`. See [docs/api.md](docs/api.md).
 
 ## Testing
 
@@ -198,26 +267,3 @@ uv run pytest tests/ --cov=src --cov-report=html
 
 All external dependencies are mocked. Tests run without API keys or a database.
 
-## Project structure
-
-```
-src/
-├── cli.py              # Click CLI entry points
-├── collector.py         # Background collection engine with status tracking
-├── scraper.py           # Twitter scraper (twscrape, async)
-├── price_fetcher.py     # yfinance price lookups with caching
-├── news_fetcher.py      # News fetching + catalyst classification
-├── config.py            # YAML + env configuration
-├── data/
-│   ├── models.py        # RawClaim + LabeledClaim dataclasses
-│   ├── labeler.py       # Rule-based claim labeling
-│   ├── stocks.py        # Defense stock universe (ticker mapping)
-│   └── db.py            # PostgreSQL persistence
-└── api/
-    ├── app.py           # Flask app factory
-    └── routes.py        # API endpoints
-```
-
-## Configuration
-
-`config.yaml` for app settings, `.env` for secrets. See [config.example.yaml](config.example.yaml) for all options.
