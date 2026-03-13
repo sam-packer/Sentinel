@@ -28,17 +28,11 @@ wheels/
 
 # twscrape database (contains account credentials)
 accounts.db
-*.json
 
+# Config (contains environment-specific settings)
 config.yaml
 
-# Digest history database (local data)
-digest_history.db
-
-# Vector memory store (ChromaDB local storage)
-memory_store/
-
-# Generic database files (in case of other SQLite usage)
+# Database files
 *.db
 
 # IDE
@@ -53,6 +47,7 @@ memory_store/
 
 # Runtime files (pid, logs, checkpoints)
 .run/
+data/
 
 # OS
 .DS_Store
@@ -60,3 +55,6 @@ Thumbs.db
 
 # uv
 .uv/
+
+# Claude Code
+.claude

@@ -4,7 +4,7 @@ import logging
 from unittest.mock import patch
 
 from src.config import (
-    Config, LabelingConfig, NeuralConfig, AppConfig,
+    Config, LabelingConfig, AppConfig,
     WorkerLogFilter, worker_context, _get_yaml, _get_yaml_section,
 )
 
@@ -32,28 +32,6 @@ class TestTwitterConfig:
         assert len(proxies) == 2
 
 
-class TestOpenAIConfig:
-    def test_openai_config_has_model(self):
-        from src.config import OpenAIConfig
-        config = OpenAIConfig()
-        assert config.model is not None
-        assert len(config.model) > 0
-
-    def test_openai_config_uses_env_api_key(self, monkeypatch):
-        monkeypatch.setenv("OPENAI_API_KEY", "test-key-123")
-        from src.config import OpenAIConfig
-        config = OpenAIConfig()
-        assert config.api_key == "test-key-123"
-
-
-class TestGoogleConfig:
-    def test_google_config_has_model(self):
-        from src.config import GoogleConfig
-        config = GoogleConfig()
-        assert config.model is not None
-        assert "gemini" in config.model.lower()
-
-
 class TestSentinelConfig:
     def test_default_config(self):
         cfg = Config()
@@ -63,7 +41,6 @@ class TestSentinelConfig:
 
     def test_validation_no_db(self, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "")
-        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
         cfg = Config()
         cfg.database.url = ""
         errors = cfg.validate()
@@ -74,34 +51,18 @@ class TestSentinelConfig:
         assert lc.exaggeration_threshold == 0.02
         assert lc.news_window_hours == 48
 
-    def test_neural_config_defaults(self):
-        nc = NeuralConfig()
-        assert nc.base_model == "ProsusAI/finbert"
-        assert nc.batch_size == 16
-        assert nc.patience == 3
-
     def test_app_config_defaults(self):
         ac = AppConfig()
-        assert ac.default_model == "neural"
         assert ac.live_news_fetch is True
 
 
 class TestConfigValidation:
-    def test_validate_missing_openai_key(self):
+    def test_validate_passes_with_db_url(self):
         cfg = Config()
-        cfg.app.llm_provider = "openai"
-        cfg.openai.api_key = ""
         cfg.database.url = "postgresql://test"
         errors = cfg.validate()
-        assert any("OPENAI_API_KEY" in e for e in errors)
-
-    def test_validate_missing_google_key(self):
-        cfg = Config()
-        cfg.app.llm_provider = "google"
-        cfg.google.api_key = ""
-        cfg.database.url = "postgresql://test"
-        errors = cfg.validate()
-        assert any("GOOGLE_API_KEY" in e for e in errors)
+        db_errors = [e for e in errors if "DATABASE_URL" in e]
+        assert len(db_errors) == 0
 
 
 class TestWorkerLogFilter:

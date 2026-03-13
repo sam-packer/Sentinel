@@ -97,35 +97,64 @@ def compute_exaggeration_score(
 ) -> float:
     """Compute exaggeration score from 0.0 (accurate) to 1.0 (wildly off).
 
-    Takes into account direction match, magnitude, catalyst presence,
-    and language intensity.
+    The score is the sum of three independent components:
+
+    Direction mismatch (0.0 or 0.5): whether the claimed direction is
+    opposite the actual price movement. This is the single strongest
+    signal because getting the direction wrong means the claim is
+    fundamentally misleading regardless of magnitude. Worth half the
+    total score on its own.
+
+    Magnitude gap (0.0 to 0.3): how much the tweet's language intensity
+    exceeds what the actual price move justifies. A 5% daily move is
+    large enough to justify even aggressive language for a single stock,
+    so the gap is calculated as intensity * (1 - move/5%) * 0.3. Below
+    5%, intense language is increasingly unsupported. When directions
+    mismatch, the full intensity counts because none of the move supports
+    the claim.
+
+    Catalyst gap (0.0 to 0.2): penalty for directional claims with no
+    news catalyst. A tweet claiming "$LMT mooning" without any contract,
+    earnings, or geopolitical news is more likely hype than informed
+    analysis. Only applied when news was actually fetched (empty results
+    from a failed fetch don't count against the claim).
+
+    These sum to a maximum of 1.0. Each component is independently
+    interpretable, so you can explain why any given tweet scored what
+    it did.
     """
     if price_change_pct is None:
-        return 0.5  # uncertain
+        return 0.5  # no price data, can't assess
 
     abs_move = abs(price_change_pct)
 
-    # Direction mismatch is the strongest signal
+    # Component 1: Direction mismatch (0.0 or 0.5)
+    # Claimed one direction, stock went the other.
+    direction_score = 0.0
     if claimed != "neutral" and actual != "neutral" and claimed != actual:
-        return min(0.7 + intensity * 0.3, 1.0)
+        direction_score = 0.5
 
-    # Strong language but tiny move
-    if claimed != "neutral" and abs_move < 1.0:
-        return min(0.4 + intensity * 0.4, 0.9)
+    # Component 2: Magnitude gap (0.0 to 0.3)
+    # How much the language oversells the actual move.
+    # At 5%+ move, even intense language is justified (gap = 0).
+    # Below 5%, the gap scales with intensity.
+    # When directions mismatch, none of the move supports the claim,
+    # so the full intensity applies.
+    magnitude_score = 0.0
+    if claimed != "neutral":
+        if direction_score > 0:
+            magnitude_score = intensity * 0.3
+        else:
+            move_ratio = min(abs_move / 5.0, 1.0)
+            magnitude_score = intensity * (1.0 - move_ratio) * 0.3
 
-    # No catalyst but claiming big move (only when we actually found news)
-    if not has_catalyst and news_available and claimed != "neutral" and abs_move < 2.0:
-        return min(0.3 + intensity * 0.3, 0.8)
+    # Component 3: Catalyst gap (0.0 to 0.2)
+    # Directional claim with no news backing it up.
+    catalyst_score = 0.0
+    if claimed != "neutral" and not has_catalyst and news_available:
+        catalyst_score = intensity * 0.2
 
-    # Direction matches and move is meaningful
-    if claimed != "neutral" and claimed == actual and abs_move >= 2.0:
-        return max(0.0, 0.2 - abs_move * 0.02)
-
-    # Neutral claim, small move — accurate
-    if claimed == "neutral" and abs_move < 2.0:
-        return 0.1
-
-    return 0.3  # default moderate
+    return min(direction_score + magnitude_score + catalyst_score, 1.0)
 
 
 def label_claim(

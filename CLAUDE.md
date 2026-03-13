@@ -47,7 +47,7 @@ uv run pytest tests/ --cov=src --cov-report=html
 uv run pytest tests/ -m "not slow"
 ```
 
-Tests use mocks for external dependencies (Twitter, yfinance, LLM providers, DuckDuckGo) and run without API keys.
+Tests use mocks for external dependencies (Twitter, yfinance, DuckDuckGo) and run without API keys.
 
 ## Key Files
 
@@ -63,10 +63,15 @@ Tests use mocks for external dependencies (Twitter, yfinance, LLM providers, Duc
 - `src/api/` — Flask API (app factory + routes)
 - `src/config.py` — YAML + env configuration
 
+## Documentation
+
+- `docs/setup.md` — Full installation, PostgreSQL setup, Twitter accounts, deployment
+- `docs/api.md` — API endpoint reference with examples
+
 ## Configuration
 
-- **`config.yaml`**: App settings (LLM provider, labeling thresholds, scraping options)
-- **`.env`**: Secrets (`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `DATABASE_URL`)
+- **`config.yaml`**: App settings (labeling thresholds, scraping options)
+- **`.env`**: Secrets (`DATABASE_URL`)
 
 ## Package Manager
 

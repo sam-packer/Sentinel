@@ -1,53 +1,98 @@
 # Sentinel
 
-Scrapes tweets about defense stocks, fetches the actual price movement and surrounding news, then labels each claim as
-**exaggerated**, **accurate**, or **understated**. Stores everything in PostgreSQL and serves it through a Flask API.
+Defense Stock Claim Analyzer. Scrapes tweets about defense stocks, fetches the actual price movement and surrounding
+news, then labels each claim as **exaggerated**, **accurate**, or **understated**.
 
-Covers 15 public defense companies (LMT, RTX, NOC, GD, BA, LHX, HII, LDOS, SAIC, BAH, KTOS, PLTR, RKLB) and
-recognizes two private ones (Anduril, Shield AI) in tweet text.
+Covers 15 public defense companies (LMT, RTX, NOC, GD, BA, LHX, HII, LDOS, SAIC, BAH, KTOS, PLTR, RKLB) and recognizes
+two private ones (Anduril, Shield AI) in tweet text.
 
-## How it works
+## Quick start
 
-The `collect` command runs a four-step pipeline:
+```bash
+uv sync
+cp config.example.yaml config.yaml
+cp .env.example .env        # set DATABASE_URL
+uv run setup
+uv run collect --days 7
+uv run serve
+```
 
-**Scrape.** Searches Twitter/X for tweets mentioning defense stocks by cashtag (`$LMT`) and company name
-(`"Lockheed Martin"`) using [twscrape](https://github.com/vladkens/twscrape). Filters out retweets, deduplicates by
-tweet ID, and resolves which ticker the tweet is about.
+See [docs/setup.md](docs/setup.md) for full installation (PostgreSQL, Twitter accounts, deployment)
+and [docs/api.md](docs/api.md) for API reference.
 
-**Enrich with price data.** For each tweet, fetches the stock price at tweet time and 24 hours later via yfinance.
-Both prices are averaged over a 30-minute window for stability (tries 5-minute candles first, falls back to hourly,
-then daily). The 24h-later price uses the first available trading candle at or after the target time, so a Friday
-tweet compares against Monday's open instead of snapping back to Friday's close. Since this needs the full 24h window,
-tweets less than 25 hours old are skipped.
+## Architecture
 
-**Enrich with news.** Fetches news articles from yfinance and DuckDuckGo within 48 hours before and after the tweet.
-Deduplicates by URL and stores all matching headlines on the claim.
+Sentinel is a four-stage retrospective pipeline. "Retrospective" because labeling requires the 24-hour price window to
+have elapsed, so tweets less than 25 hours old are skipped during enrichment.
 
-Headlines are then scanned for keywords that indicate a real news event ("catalyst") that could explain a price move.
-A tweet claiming "$LMT to the moon!" is more credible if there's a headline about a Pentagon contract than if the
-only news is generic market commentary. The labeler uses this: directional claims backed by a catalyst are judged
-more leniently than claims with no news backing them.
+```
+Twitter/X ──► Scrape ──► Enrich (price + news) ──► Label ──► PostgreSQL ──► Flask API
+```
+
+### Stage 1: Scrape
+
+Searches Twitter/X for tweets mentioning defense stocks by cashtag (`$LMT`) and company name (`"Lockheed Martin"`)
+using [twscrape](https://github.com/Telesphoreo/twscrape). All ticker searches run concurrently via `asyncio.gather`,
+with twscrape's account pool handling rotation and rate limiting across the parallel tasks.
+
+Each tweet is deduplicated by tweet ID, retweets are filtered out, and the ticker is resolved. If a tweet mentions
+multiple defense stocks, the scraper picks the most specific match (longest company name found in text).
+
+The `--days` flag scrapes each day independently rather than requesting a single wide time window. This prevents
+Twitter from biasing results toward popular/recent tweets and gives more even temporal distribution.
+
+### Stage 2: Enrich with price data
+
+For each tweet, fetches two prices via yfinance:
+
+- **Price at tweet time**, averaged over a 30-minute window centered on the tweet timestamp.
+- **Price 24 hours later**, the first available trading candle at or after the 24h mark.
+
+The 24h-later price deliberately uses the *next available* candle rather than interpolating. A Friday afternoon tweet
+compares against Monday's open, not Friday's close again. This way the price reflects the actual information gap a
+reader would have experienced.
+
+Both prices try 5-minute candles first (most granular), fall back to hourly, then daily. The 30-minute averaging window
+smooths out intraday noise.
+
+### Stage 3: Enrich with news
+
+Fetches news articles from yfinance ticker news and DuckDuckGo news search within a ±48-hour window around the tweet.
+Articles are deduplicated by URL.
+
+Headlines are scanned for keywords that indicate a catalyst, meaning a real news event that could explain a price move.
+A tweet claiming "$LMT to the moon!" is more credible if there's a headline about a Pentagon contract than if the only
+news is generic market commentary.
 
 Four catalyst types are checked in priority order (first match wins):
 
-- Contract: contract, award, pentagon, DoD, IDIQ, LRIP, billion-dollar deal
-- Earnings: EPS, quarterly, beat/miss, guidance, revenue
-- Geopolitical: war, conflict, missile, strike, Ukraine, Taiwan, NATO, escalation
-- Budget: NDAA, defense budget, appropriations, sequestration
+| Catalyst     | Example keywords                                           |
+|--------------|------------------------------------------------------------|
+| Contract     | contract, award, pentagon, DoD, IDIQ, LRIP, billion-dollar |
+| Earnings     | EPS, quarterly, beat/miss, guidance, revenue               |
+| Geopolitical | war, conflict, missile, strike, Ukraine, Taiwan, NATO      |
+| Budget       | NDAA, defense budget, appropriations, sequestration        |
 
-**Label.** Compares what the tweet claimed against what actually happened:
+The priority ordering matters: a headline mentioning both a "Pentagon contract" and "budget" is classified as
+`contract`, because contract wins are more directly price-moving than general budget news.
 
-1. Parses the tweet for directional language. Bullish keywords (moon, pump, surge, rally, bullish, calls, long) and
-   emoji (rocket, chart-up, diamond, fire) count toward "up." Bearish keywords (crash, dump, plunge, short, puts,
-   bearish) and emoji (chart-down, skull, bear) count toward "down." Mixed or absent signals resolve to "neutral."
+### Stage 4: Label
 
-2. Determines the actual direction from the 24h price change: above +0.5% is up, below -0.5% is down, otherwise
-   neutral.
+Compares what the tweet *claimed* against what *actually happened*. This is entirely rule-based, no ML models, just
+string matching and hardcoded thresholds.
 
-3. Scores the tweet's intensity from 0 to 1 based on exclamation marks, ALL CAPS words, emoji, and superlatives
-   like "insane" or "massive."
+The labeler first parses claimed direction from the tweet text. Bullish keywords (`moon`, `pump`, `surge`, `rally`,
+`bullish`, `calls`, `long`) and emoji (🚀📈💎🔥💰🐂) count toward "up." Bearish keywords (`crash`, `dump`, `plunge`,
+`short`, `puts`, `bearish`) and emoji (📉🔻💀🐻⚠️) count toward "down." If both signals are present, the result is
+"neutral."
 
-4. Assigns a label:
+Then it determines actual direction from the 24h price change: above +0.5% is up, below -0.5% is down, otherwise
+neutral.
+
+It also scores tweet intensity from 0 to 1, based on exclamation marks, ALL CAPS words, emoji density, and superlatives
+like "insane" or "massive". This feeds into the exaggeration score but is not stored separately.
+
+The label is assigned by these rules:
 
 | Condition                                          | Label       |
 |----------------------------------------------------|-------------|
@@ -59,159 +104,90 @@ Four catalyst types are checked in priority order (first match wins):
 | Neutral tweet, price moved 5% or more              | understated |
 | Price moved 10%+ but tweet intensity below 0.3     | understated |
 
-5. Computes an exaggeration score from 0.0 (spot on) to 1.0 (completely wrong). Direction mismatches start at 0.7;
-   loud language on a flat stock starts at 0.4; matching calls on real moves score near 0.0.
+### Exaggeration score
 
-Labeled claims are stored in PostgreSQL (`raw_claims` + `labeled_claims` tables) with all price data, news headlines,
-catalyst type, directions, and scores.
+Separately from the three-bucket label, each claim gets a continuous exaggeration score from 0.0 (spot-on) to 1.0
+(completely wrong). The score is the sum of three independent components, each with a clear rationale:
 
-## Prerequisites
+**Direction mismatch: 0.0 or 0.5.** If the tweet claimed one direction and the stock went the other, that's half the
+score by itself. This is the strongest signal because a wrong-direction call is fundamentally misleading regardless of
+how big or small the move was. A calm wrong-direction tweet scores 0.5; a hyperbolic one scores higher because the other
+components add on top.
 
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/) package manager
-- PostgreSQL 17
-- Twitter/X accounts with exported cookies (for scraping)
+**Magnitude gap: 0.0 to 0.3.** Measures how much the tweet's language intensity exceeds what the actual price move
+justifies. A 5% daily move is large enough to justify even aggressive language for a single stock, so the gap is
+`intensity * (1 - move/5%) * 0.3`. At 5%+, this component is zero. Below that, hype language on a small move gets
+penalized proportionally. When directions mismatch, the full intensity counts because none of the move supports the
+claim.
 
-## Setup
+**Catalyst gap: 0.0 to 0.2.** Penalty for directional claims with no news catalyst. A tweet claiming "$LMT mooning"
+with a Pentagon contract headline behind it is more credible than the same tweet with no relevant news. Calculated as
+`intensity * 0.2`, but only when news was actually fetched (a failed news fetch doesn't count against the claim).
 
-### 1. Install PostgreSQL 17
+These three components sum to a maximum of 1.0. Because they're additive and independent, you can explain exactly why
+any tweet scored what it did. For example, a score of 0.62 might break down as: 0.5 for wrong direction + 0.09 for
+moderate language + 0.03 for weak catalyst backing.
 
-```bash
-sudo apt install -y postgresql-common
-sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
-sudo apt install -y postgresql-17
-```
+## Claim data model
 
-### 2. Create the database
+Each claim carries data from scraping, enrichment, and labeling. All fields are stored in PostgreSQL and returned by the
+API.
 
-```bash
-sudo -u postgres psql
-```
+Tweet fields:
 
-```sql
-CREATE USER sentinel WITH PASSWORD 'your-secure-password';
-CREATE DATABASE sentinel_db OWNER sentinel;
-\q
-```
+| Field          | Description                                                                                                                 |
+|----------------|-----------------------------------------------------------------------------------------------------------------------------|
+| `tweet_id`     | Twitter's unique ID. Primary key, used for deduplication.                                                                   |
+| `text`         | Full tweet text.                                                                                                            |
+| `username`     | Twitter handle.                                                                                                             |
+| `created_at`   | When the tweet was posted. Everything else is anchored to this timestamp.                                                   |
+| `likes`        | Like count at scrape time.                                                                                                  |
+| `retweets`     | Retweet count at scrape time.                                                                                               |
+| `ticker`       | Resolved stock ticker (e.g. `LMT`). If a tweet mentions multiple defense stocks, the scraper picks the most specific match. |
+| `company_name` | Full company name (e.g. `Lockheed Martin`), looked up from the ticker.                                                      |
 
-No extensions required.
+Price enrichment fields:
 
-### 3. Install dependencies
+| Field              | Description                                                                           |
+|--------------------|---------------------------------------------------------------------------------------|
+| `price_at_tweet`   | Stock price around tweet time, averaged over a 30-minute window.                      |
+| `price_24h_later`  | Stock price ~24h later. Uses first available trading candle at or after the 24h mark. |
+| `price_change_pct` | Percentage change: `((price_24h_later - price_at_tweet) / price_at_tweet) * 100`.     |
 
-```bash
-uv sync
-```
+News enrichment fields:
 
-### 4. Configure
+| Field            | Description                                                                                               |
+|------------------|-----------------------------------------------------------------------------------------------------------|
+| `news_headlines` | Article titles found within ±48h of the tweet (yfinance + DuckDuckGo, deduplicated by URL). Can be empty. |
+| `has_catalyst`   | Whether any headline matched a catalyst keyword category.                                                 |
+| `catalyst_type`  | First matching category: `contract`, `earnings`, `geopolitical`, `budget`. Null if none matched.          |
 
-```bash
-cp config.example.yaml config.yaml
-cp .env.example .env
-```
+Labeling fields:
 
-Edit `.env`:
-
-```
-DATABASE_URL=postgresql://sentinel:your-secure-password@localhost:5432/sentinel_db
-OPENAI_API_KEY=sk-...       # if using OpenAI provider
-GOOGLE_API_KEY=...           # if using Google provider
-```
-
-### 5. Add Twitter accounts
-
-Sentinel uses [twscrape](https://github.com/vladkens/twscrape) for scraping. You need at least one Twitter/X account
-with exported cookies.
-
-1. Log into Twitter/X in your browser
-2. Export cookies as JSON using a browser extension (e.g., "Cookie-Editor")
-3. Add the account:
-
-```bash
-uv run python add_account.py <twitter_username> <cookies.json>
-```
-
-Multiple accounts improve rate limit handling. Proxies can be configured in `config.yaml`:
-
-```yaml
-twitter:
-  proxies:
-    - socks5://user:pass@host1:port
-    - socks5://user:pass@host2:port
-```
-
-### 6. Initialize and run
-
-```bash
-uv run setup
-uv run collect -n 100
-uv run serve
-```
+| Field                | Description                                                                          |
+|----------------------|--------------------------------------------------------------------------------------|
+| `claimed_direction`  | Parsed from tweet text: `up`, `down`, or `neutral`.                                  |
+| `actual_direction`   | From price change: above +0.5% is `up`, below -0.5% is `down`, otherwise `neutral`.  |
+| `label`              | Final verdict: `exaggerated`, `accurate`, or `understated`.                          |
+| `exaggeration_score` | 0.0 (accurate) to 1.0 (completely wrong). More granular than the three-bucket label. |
+| `news_summary`       | First headline from `news_headlines`, used for display.                              |
 
 ## CLI
 
-| Command                            | Description                                      |
-|------------------------------------|--------------------------------------------------|
-| `setup`                            | Init DB schema, sanity check labeler             |
-| `collect`                          | Scrape yesterday's tweets, enrich, label, store  |
-| `collect --days 7`                 | Scrape last 7 days, one day at a time            |
-| `collect -n 100 --tickers LMT,RTX` | Specific tickers, 100 per ticker                 |
-| `collect --background`             | Run in background                                |
-| `collect --status`                 | Check background collection progress             |
-| `collect --stop`                   | Stop background collection                       |
-| `enrich`                           | Re-enrich all existing claims                    |
-| `enrich --days 7`                  | Re-enrich claims from the last 7 days            |
-| `enrich --unlabeled`               | Only enrich claims that haven't been labeled yet |
-| `enrich --background`              | Run enrichment in background                     |
-| `enrich --status`                  | Check background enrichment progress             |
-| `enrich --stop`                    | Stop background enrichment                       |
-| `serve`                            | Start API (gunicorn, 4 workers)                  |
-| `serve --dev`                      | Flask dev server with hot reload                 |
-
-All commands use `uv run`.
-
-### Collecting tweets
-
-`collect` scrapes tweets, enriches them with price/news data, labels them, and stores them in the database.
-
-The `--days` flag controls how far back to scrape. The time window always ends 25 hours ago so that every tweet has a
-complete 24-hour price window for enrichment. When `--days` is greater than 1, each day is scraped independently so
-you get even temporal distribution instead of Twitter biasing toward popular/recent tweets.
-
-The `-n` flag sets tweets per ticker per day. With 15 defense tickers, `-n 50` gives ~750 tweets per day.
-
-```bash
-uv run collect                        # yesterday, 50/ticker
-uv run collect --days 7               # last 7 days, 50/ticker/day
-uv run collect --days 7 -n 70         # last 7 days, ~1000 tweets/day
-uv run collect --tickers LMT,RTX      # specific tickers only
-```
-
-## API
-
-Served via gunicorn at `/api`.
-
-| Method | Endpoint           | Description                            |
-|--------|--------------------|----------------------------------------|
-| `POST` | `/api/analyze`     | Label a tweet using current price data |
-| `GET`  | `/api/feed`        | Paginated labeled claims, newest first |
-| `GET`  | `/api/feed/stream` | SSE stream of new claims               |
-| `GET`  | `/api/stats`       | Label distribution, top tickers        |
-| `GET`  | `/api/stocks`      | Defense stock universe                 |
-| `GET`  | `/api/health`      | DB connectivity check                  |
-
-`/api/feed` takes `limit` (default 50, max 200), `offset`, and optional `label` filter.
-
-`/api/analyze` takes `{"text": "...", "ticker": "LMT"}`. Ticker is optional and will be resolved from the text.
-When `live_news_fetch` is enabled, it fetches current price and news before labeling.
-
-```bash
-curl -X POST http://localhost:5000/api/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"text": "$LMT to the moon!", "ticker": "LMT"}'
-
-curl http://localhost:5000/api/feed?limit=20
-curl http://localhost:5000/api/stats
-```
+| Command                                   | Description                                     |
+|-------------------------------------------|-------------------------------------------------|
+| `uv run setup`                            | Init DB schema, sanity check labeler            |
+| `uv run collect`                          | Scrape yesterday's tweets, enrich, label, store |
+| `uv run collect --days 7`                 | Scrape last 7 days, one day at a time           |
+| `uv run collect -n 100 --tickers LMT,RTX` | Specific tickers, 100 per ticker                |
+| `uv run collect --background`             | Run in background                               |
+| `uv run collect --status`                 | Check background progress                       |
+| `uv run collect --stop`                   | Stop background collection                      |
+| `uv run enrich`                           | Re-enrich all existing claims                   |
+| `uv run enrich --days 7`                  | Re-enrich claims from the last 7 days           |
+| `uv run enrich --unlabeled`               | Only enrich unlabeled claims                    |
+| `uv run serve`                            | Start API (gunicorn, 4 workers)                 |
+| `uv run serve --dev`                      | Flask dev server with hot reload                |
 
 ## Testing
 
@@ -222,119 +198,26 @@ uv run pytest tests/ --cov=src --cov-report=html
 
 All external dependencies are mocked. Tests run without API keys or a database.
 
+## Project structure
+
+```
+src/
+├── cli.py              # Click CLI entry points
+├── collector.py         # Background collection engine with status tracking
+├── scraper.py           # Twitter scraper (twscrape, async)
+├── price_fetcher.py     # yfinance price lookups with caching
+├── news_fetcher.py      # News fetching + catalyst classification
+├── config.py            # YAML + env configuration
+├── data/
+│   ├── models.py        # RawClaim + LabeledClaim dataclasses
+│   ├── labeler.py       # Rule-based claim labeling
+│   ├── stocks.py        # Defense stock universe (ticker mapping)
+│   └── db.py            # PostgreSQL persistence
+└── api/
+    ├── app.py           # Flask app factory
+    └── routes.py        # API endpoints
+```
+
 ## Configuration
 
-`config.yaml` for settings, `.env` for secrets. Environment variables override YAML.
-
-```yaml
-app:
-  port: 5000
-  live_news_fetch: true
-
-twitter:
-  db_path: accounts.db
-  proxies: [ ]
-
-llm:
-  provider: google
-  openai_model: gpt-4o
-  google_model: gemini-2.0-flash
-
-scraping:
-  limit_per_ticker: 50
-  search_timeout: 300
-
-labeling:
-  exaggeration_threshold: 0.02   # 2% minimum significant move
-  news_window_hours: 48
-
-logging:
-  level: INFO
-```
-
-## Claim fields
-
-Each claim carries data from scraping, enrichment, and labeling. All of these are stored in PostgreSQL and
-returned by the API.
-
-**From the tweet:**
-
-| Field          | Description                                                                                                                 |
-|----------------|-----------------------------------------------------------------------------------------------------------------------------|
-| `tweet_id`     | Twitter's unique ID. Primary key, used for deduplication.                                                                   |
-| `text`         | Full tweet text.                                                                                                            |
-| `username`     | Twitter handle that posted it.                                                                                              |
-| `created_at`   | When the tweet was posted. Everything else is anchored to this timestamp.                                                   |
-| `likes`        | Like count at scrape time. Stored but not used in labeling.                                                                 |
-| `retweets`     | Retweet count at scrape time. Stored but not used in labeling.                                                              |
-| `ticker`       | Resolved stock ticker (e.g. "LMT"). If a tweet mentions multiple defense stocks, the scraper picks the most specific match. |
-| `company_name` | Full company name (e.g. "Lockheed Martin"), looked up from the ticker.                                                      |
-
-**From price enrichment:**
-
-| Field              | Description                                                                                                                                                           |
-|--------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `price_at_tweet`   | Stock price around when the tweet was posted, averaged over a 30-minute window.                                                                                       |
-| `price_24h_later`  | Stock price ~24 hours later. Uses the first available trading candle at or after the 24h mark, so a Friday tweet gets Monday's price instead of Friday's close again. |
-| `price_change_pct` | Percentage change between those two prices: `((price_24h_later - price_at_tweet) / price_at_tweet) * 100`.                                                            |
-
-**From news enrichment:**
-
-| Field            | Description                                                                                                                                     |
-|------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
-| `news_headlines` | JSON array of article titles found within 48 hours before or after the tweet (from yfinance and DuckDuckGo, deduplicated by URL). Can be empty. |
-| `has_catalyst`   | True if any headline matched a catalyst keyword category.                                                                                       |
-| `catalyst_type`  | Which category matched first in priority order: `contract`, `earnings`, `geopolitical`, `budget`. Null if nothing matched or no news was found. |
-
-**From labeling:**
-
-| Field                | Description                                                                                                                                                                                                |
-|----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `claimed_direction`  | What the tweet predicted, from keyword/emoji matching. "up" (bullish language like "moon", "surge", rocket emoji), "down" (bearish like "crash", "dump"), or "neutral" (no signal or conflicting signals). |
-| `actual_direction`   | What the stock actually did. Above +0.5% = "up", below -0.5% = "down", otherwise "neutral".                                                                                                                |
-| `label`              | Final verdict: "exaggerated" (wrong or overblown), "accurate" (matched reality), or "understated" (underplayed a real move).                                                                               |
-| `exaggeration_score` | 0.0 (nailed it) to 1.0 (completely wrong). Direction mismatches start at 0.7, hype on a flat stock starts at 0.4, correct calls on real moves score near 0.0. More granular than the three-bucket label.   |
-| `news_summary`       | First headline from `news_headlines`, used for display. Empty if no news found.                                                                                                                            |
-
-The intensity score (0-1, based on exclamation marks, caps, emoji, superlatives like "insane" or "massive")
-feeds into the exaggeration score but is not stored separately.
-
-## Deployment
-
-### Dedicated user setup
-
-```bash
-sudo useradd -m -s /bin/bash sentinel
-sudo mkdir -p /opt/sentinel
-sudo chown sentinel:sentinel /opt/sentinel
-sudo -iu sentinel
-
-curl -LsSf https://astral.sh/uv/install.sh | sh
-git clone <repo-url> /opt/sentinel/app
-cd /opt/sentinel/app
-cp config.example.yaml config.yaml
-cp .env.example .env
-editor .env
-chmod 600 .env
-uv sync
-uv run setup
-uv run python add_account.py <username> <cookies.json>
-exit
-```
-
-### systemd
-
-```bash
-sudo cp /opt/sentinel/app/systemd/sentinel.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now sentinel.service
-```
-
-### Environment variables
-
-| Variable          | Required        | Description                  |
-|-------------------|-----------------|------------------------------|
-| `DATABASE_URL`    | Yes             | PostgreSQL connection string |
-| `OPENAI_API_KEY`  | If using OpenAI | For analysis explanations    |
-| `GOOGLE_API_KEY`  | If using Google | For analysis explanations    |
-| `TWITTER_PROXIES` | No              | Comma-separated proxy list   |
+`config.yaml` for app settings, `.env` for secrets. See [config.example.yaml](config.example.yaml) for all options.

@@ -1,10 +1,9 @@
 # Sentinel — Defense Stock Claim Analyzer
 # Copy this file to config.yaml and customize as needed.
-# Secrets (API keys, DATABASE_URL) go in .env, not here.
+# Secrets (DATABASE_URL) go in .env, not here.
 
 # Application Settings
 app:
-  spacy_model: en_core_web_lg
   port: 5000
   live_news_fetch: true
 
@@ -15,12 +14,6 @@ twitter:
     # - socks5://user:pass@host1:port
     # - socks5://user:pass@host2:port
 
-# LLM Provider Settings
-llm:
-  provider: google
-  openai_model: gpt-4o
-  google_model: gemini-2.0-flash
-
 # Scraping Settings
 scraping:
   limit_per_ticker: 50
@@ -30,22 +23,6 @@ scraping:
 labeling:
   exaggeration_threshold: 0.02
   news_window_hours: 48
-
-# Model Configuration
-models:
-  default: neural
-
-# Neural Model Settings
-neural:
-  base_model: ProsusAI/finbert
-  fallback_model: distilbert-base-uncased
-  news_encoder: sentence-transformers/all-MiniLM-L6-v2
-  max_length: 128
-  batch_size: 16
-  learning_rate_bert: 2.0e-5
-  learning_rate_head: 1.0e-3
-  max_epochs: 10
-  patience: 3
 
 # Logging
 logging:

@@ -173,9 +173,9 @@ def setup():
     click.echo("=== Sentinel Setup ===")
 
     # 1. Create directories
-    for d in ["data/outputs", "models/classical", "models/neural"]:
+    for d in ["data/outputs"]:
         Path(d).mkdir(parents=True, exist_ok=True)
-    click.echo("[1/5] Directories created")
+    click.echo("[1/4] Directories created")
 
     # 2. Initialize database
     if config.database.url:
@@ -185,22 +185,14 @@ def setup():
             db.connect()
             db.init_schema()
             db.close()
-            click.echo("[2/5] Database schema initialized")
+            click.echo("[2/4] Database schema initialized")
         except Exception as e:
-            click.echo(f"[2/5] Database setup failed: {e}", err=True)
+            click.echo(f"[2/4] Database setup failed: {e}", err=True)
             click.echo("       Set DATABASE_URL in .env and ensure PostgreSQL is running.")
     else:
-        click.echo("[2/5] Skipped (DATABASE_URL not set)")
+        click.echo("[2/4] Skipped (DATABASE_URL not set)")
 
-    # 3. Check spaCy model
-    try:
-        import spacy
-        spacy.load(config.app.spacy_model)
-        click.echo(f"[3/5] spaCy model '{config.app.spacy_model}' loaded")
-    except OSError:
-        click.echo(f"[3/5] spaCy model not found. Run: python -m spacy download {config.app.spacy_model}")
-
-    # 4. Sanity check with hardcoded examples
+    # 3. Sanity check with hardcoded examples
     from .data.labeler import label_claim
     from .data.models import RawClaim
 
@@ -229,7 +221,7 @@ def setup():
         ),
     ]
 
-    click.echo("[4/5] Sanity check:")
+    click.echo("[3/4] Sanity check:")
     for raw in examples:
         labeled = label_claim(raw)
         click.echo(
@@ -238,7 +230,7 @@ def setup():
             f"score: {labeled.exaggeration_score})"
         )
 
-    click.echo("[5/5] Setup complete.")
+    click.echo("[4/4] Setup complete.")
     click.echo("\nNext steps:")
     click.echo("  uv run collect --n 100  # Scrape claims")
     click.echo("  uv run serve            # Start API server")

@@ -137,13 +137,32 @@ class TestNoNewsPenalty:
 
 class TestExaggerationScore:
     def test_direction_mismatch_high_score(self):
+        # Direction mismatch = 0.5, magnitude = 0.5*0.3 = 0.15, catalyst = 0
         score = compute_exaggeration_score("up", "down", -5.0, True, 0.5)
-        assert score >= 0.7
+        assert score >= 0.5
+
+    def test_direction_mismatch_intense_language(self):
+        # Direction mismatch = 0.5, magnitude = 1.0*0.3 = 0.3, no catalyst = 1.0*0.2
+        score = compute_exaggeration_score("up", "down", -5.0, False, 1.0)
+        assert score == 1.0
 
     def test_accurate_low_score(self):
+        # Direction match, 5% move justifies language, has catalyst
+        # All three components are 0
         score = compute_exaggeration_score("up", "up", 5.0, True, 0.3)
-        assert score <= 0.2
+        assert score == 0.0
 
     def test_no_price_uncertain(self):
         score = compute_exaggeration_score("up", "neutral", None, False, 0.5)
         assert score == 0.5
+
+    def test_components_are_additive(self):
+        # No mismatch, small move (1%), no catalyst, moderate intensity
+        # direction = 0, magnitude = 0.5 * (1 - 1/5) * 0.3 = 0.12, catalyst = 0.5 * 0.2 = 0.1
+        score = compute_exaggeration_score("up", "up", 1.0, False, 0.5)
+        assert abs(score - 0.22) < 0.01
+
+    def test_neutral_claim_scores_zero(self):
+        # Neutral claims have no magnitude or catalyst gap
+        score = compute_exaggeration_score("neutral", "neutral", 0.5, False, 0.0)
+        assert score == 0.0
