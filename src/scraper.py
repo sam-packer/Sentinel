@@ -4,20 +4,19 @@ Defense Stock Tweet Scraper for Sentinel.
 Searches Twitter/X for tweets mentioning defense company names and tickers,
 converts them to RawClaim objects with resolved tickers.
 
-Uses twscrape for async scraping with account pool management and rate limiting.
+Uses twscrape for async scraping with automatic account rotation and rate limiting.
 """
 
 import asyncio
 import logging
-import random
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from twscrape import API
 from twscrape.models import Tweet
 
-from .config import worker_context
-from .data.stocks import DEFENSE_STOCKS, TICKER_NAMES, resolve_ticker, get_public_tickers
+from .data.stocks import TICKER_NAMES, resolve_ticker, get_public_tickers
 from .data.models import RawClaim
 
 logger = logging.getLogger("sentinel.scraper")
@@ -121,17 +120,18 @@ class DefenseStockScraper:
         query: str,
         limit: int = 50,
         lang: str = "en",
-        timeout: int = 300,
         since: datetime | None = None,
         until: datetime | None = None,
     ) -> list[ScrapedTweet]:
         """Search for tweets matching a query.
 
+        twscrape handles rate limiting, account rotation, and request pacing
+        internally — no manual delays or batching needed.
+
         Args:
             query: Search query (cashtag, company name, etc.).
             limit: Maximum number of tweets to retrieve.
             lang: Language filter.
-            timeout: Maximum time in seconds.
             since: Only return tweets after this time (inclusive).
             until: Only return tweets before this time (exclusive).
 
@@ -142,73 +142,27 @@ class DefenseStockScraper:
         tweets: list[ScrapedTweet] = []
         search_query = f"{query} lang:{lang}"
 
-        # Add time-based filters using Twitter's since_time:/until_time: operators
         if since is not None:
-            ts = int(since.timestamp())
-            search_query += f" since_time:{ts}"
-            logger.info(f"Filtering tweets since {since.isoformat()}")
+            search_query += f" since_time:{int(since.timestamp())}"
         if until is not None:
-            ts = int(until.timestamp())
-            search_query += f" until_time:{ts}"
-            logger.info(f"Filtering tweets until {until.isoformat()}")
+            search_query += f" until_time:{int(until.timestamp())}"
 
-        # Check account availability
-        try:
-            stats = await api.pool.stats()
-            active = stats.get("active", 0)
-            total = stats.get("total", 0)
-            if total > 0 and active == 0:
-                logger.warning(
-                    f"All {total} accounts are rate-limited. "
-                    "Increasing timeout to allow waiting..."
-                )
-                timeout = max(timeout, 960)
-        except Exception as e:
-            logger.debug(f"Could not check account availability: {e}")
-
-        if limit > 100:
-            logger.warning(
-                f"High tweet limit ({limit}) may trigger rate limits. "
-                "Consider reducing limit_per_ticker."
-            )
-
-        logger.info(f"Searching: '{search_query}' (limit: {limit}, timeout: {timeout}s)")
-        safety_timeout = 1200
+        logger.info(f"Searching: '{search_query}' (limit: {limit})")
 
         try:
-            raw_tweets = []
-            jitter = random.uniform(1, 5)
-            await asyncio.sleep(jitter)
-
-            async def fetch_with_delays():
-                count = 0
-                async for tweet in api.search(search_query, limit=limit):
-                    raw_tweets.append(tweet)
-                    count += 1
-                    if count % 15 == 0:
-                        delay = random.uniform(10, 15)
-                        logger.debug(f"Search '{query}': {count} tweets, pacing {delay:.1f}s")
-                        await asyncio.sleep(delay)
-                return raw_tweets
-
-            await asyncio.wait_for(fetch_with_delays(), timeout=safety_timeout)
-
-            for tweet in raw_tweets:
-                try:
-                    scraped = ScrapedTweet.from_twscrape(tweet)
-                    tweets.append(scraped)
-                except Exception as e:
-                    logger.warning(f"Failed to parse tweet {tweet.id}: {e}")
+            async with aclosing(api.search(search_query, limit=limit)) as gen:
+                async for tweet in gen:
+                    try:
+                        tweets.append(ScrapedTweet.from_twscrape(tweet))
+                    except Exception as e:
+                        logger.warning(f"Failed to parse tweet {tweet.id}: {e}")
 
             logger.info(f"Retrieved {len(tweets)} tweets for: {query}")
             return tweets
 
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout for '{query}' after {safety_timeout}s")
-            return tweets
         except Exception as e:
             logger.error(f"Error searching '{query}': {e}")
-            return []
+            return tweets
 
     async def scrape_defense_claims(
         self,
@@ -220,11 +174,14 @@ class DefenseStockScraper:
     ) -> list[RawClaim]:
         """Scrape tweets about defense stocks and convert to RawClaims.
 
+        Launches all ticker searches concurrently via asyncio.gather — twscrape's
+        account pool handles rotation and rate limiting across the parallel tasks.
+
         Args:
             tickers: Tickers to scrape. Defaults to all public defense tickers.
             limit_per_ticker: Max tweets per ticker.
             on_ticker_done: Optional callback(ticker, claims_found, tickers_done, tickers_total)
-                called after each ticker batch completes.
+                called after each ticker completes.
             since: Only return tweets after this time.
             until: Only return tweets before this time.
 
@@ -243,76 +200,50 @@ class DefenseStockScraper:
                 parts.append(f"until {until.isoformat()}")
             time_desc = f" ({', '.join(parts)})"
         logger.info(f"Scraping {len(tickers)} defense tickers, {limit_per_ticker} tweets each{time_desc}")
-        all_claims: list[RawClaim] = []
+
         seen_tweet_ids: set[int] = set()
+        all_claims: list[RawClaim] = []
 
-        stats = await self.get_account_stats()
-        active_count = max(stats.get("active", 1), 1)
-        workers_per_batch = min(active_count, 2)
+        async def process_ticker(ticker: str) -> list[RawClaim]:
+            queries = _build_search_queries(ticker)
+            company = TICKER_NAMES.get(ticker, ticker)
+            ticker_tweets: list[ScrapedTweet] = []
 
-        # Process tickers in batches to manage rate limits
-        ticker_index = 0
-        batch_number = 0
+            for query in queries:
+                results = await self.search_tweets(
+                    query, limit=limit_per_ticker // len(queries),
+                    since=since, until=until,
+                )
+                ticker_tweets.extend(results)
 
-        while ticker_index < len(tickers):
-            batch_tickers = tickers[ticker_index:ticker_index + workers_per_batch]
-
-            async def process_ticker(wid: int, ticker: str):
-                worker_context.set(wid)
-                queries = _build_search_queries(ticker)
-                company = TICKER_NAMES.get(ticker, ticker)
-                ticker_tweets: list[ScrapedTweet] = []
-
-                for query in queries:
-                    results = await self.search_tweets(
-                        query, limit=limit_per_ticker // len(queries),
-                        since=since, until=until,
-                    )
-                    ticker_tweets.extend(results)
-
-                claims = []
-                for tweet in ticker_tweets:
-                    if tweet.id in seen_tweet_ids:
-                        continue
-                    if tweet.is_retweet:
-                        continue
-                    seen_tweet_ids.add(tweet.id)
-
-                    # Resolve ticker from text (may match a different defense stock)
-                    resolved = resolve_ticker(tweet.text)
-                    if resolved is None:
-                        resolved = ticker
-                    resolved_name = TICKER_NAMES.get(resolved, company)
-
-                    claims.append(tweet.to_raw_claim(resolved, resolved_name))
-
-                logger.info(f"${ticker}: {len(claims)} claims from {len(ticker_tweets)} tweets")
-                return claims
-
-            base_slot = (batch_number * workers_per_batch) % active_count
-            worker_slots = [(base_slot + i) % active_count for i in range(len(batch_tickers))]
-
-            tasks = [
-                process_ticker(worker_slots[i], ticker)
-                for i, ticker in enumerate(batch_tickers)
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for ticker, result in zip(batch_tickers, results):
-                if isinstance(result, Exception):
-                    logger.error(f"Failed to scrape ${ticker}: {result}")
+            claims = []
+            for tweet in ticker_tweets:
+                if tweet.id in seen_tweet_ids:
                     continue
-                all_claims.extend(result)
+                if tweet.is_retweet:
+                    continue
+                seen_tweet_ids.add(tweet.id)
 
-            ticker_index += len(batch_tickers)
-            batch_number += 1
+                resolved = resolve_ticker(tweet.text)
+                if resolved is None:
+                    resolved = ticker
+                resolved_name = TICKER_NAMES.get(resolved, company)
+                claims.append(tweet.to_raw_claim(resolved, resolved_name))
+
+            logger.info(f"${ticker}: {len(claims)} claims from {len(ticker_tweets)} tweets")
+            return claims
+
+        tasks = [process_ticker(ticker) for ticker in tickers]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for i, (ticker, result) in enumerate(zip(tickers, results)):
+            if isinstance(result, Exception):
+                logger.error(f"Failed to scrape ${ticker}: {result}")
+                continue
+            all_claims.extend(result)
 
             if on_ticker_done:
-                last_ticker = batch_tickers[-1]
-                on_ticker_done(last_ticker, len(all_claims), ticker_index, len(tickers))
-
-            if ticker_index < len(tickers):
-                await asyncio.sleep(5)
+                on_ticker_done(ticker, len(all_claims), i + 1, len(tickers))
 
         logger.info(f"Scraping complete: {len(all_claims)} total claims from {len(tickers)} tickers")
         return all_claims
