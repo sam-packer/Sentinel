@@ -20,6 +20,8 @@ dependencies = [
     "psycopg[binary]",
     "click",
     "gunicorn",
+    "matplotlib>=3.10.8",
+    "ipykernel>=7.2.0",
 ]
 
 [project.scripts]
@@ -27,6 +29,9 @@ setup = "src.cli:setup"
 collect = "src.cli:collect"
 enrich = "src.cli:enrich"
 serve = "src.cli:serve"
+train = "src.cli:train"
+evaluate = "src.cli:evaluate"
+predict = "src.cli:predict"
 
 [dependency-groups]
 dev = [

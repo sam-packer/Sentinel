@@ -477,3 +477,153 @@ def serve(host: str, port: int | None, workers: int, dev: bool):
             "--access-logfile", "-",
             "--error-logfile", "-",
         ])
+
+
+# ---------------------------------------------------------------------------
+# Model helpers
+# ---------------------------------------------------------------------------
+
+from .models import MODEL_REGISTRY, MODEL_DIR
+
+
+def _get_model(name: str):
+    """Import and instantiate a model by name."""
+    if name not in MODEL_REGISTRY:
+        available = ", ".join(sorted(MODEL_REGISTRY))
+        click.echo(f"Unknown model '{name}'. Available: {available}", err=True)
+        sys.exit(1)
+
+    module_path, class_name = MODEL_REGISTRY[name].rsplit(":", 1)
+    import importlib
+    module = importlib.import_module(module_path)
+    cls = getattr(module, class_name)
+    return cls()
+
+
+# ---------------------------------------------------------------------------
+# train
+# ---------------------------------------------------------------------------
+
+@click.command()
+@click.argument("model_name")
+@click.option("--test-size", default=0.2, type=float, help="Fraction held out for testing (default: 0.2)")
+@click.option("--seed", default=42, type=int, help="Random seed for train/test split")
+def train(model_name: str, test_size: float, seed: int):
+    """Train a model. Usage: uv run train baseline"""
+    _init()
+
+    if not config.database.url:
+        click.echo("Error: DATABASE_URL not set.", err=True)
+        sys.exit(1)
+
+    from .data.db import SentinelDB
+    from .models.data import load_labeled_claims, prepare_split
+
+    model = _get_model(model_name)
+
+    # Load data
+    click.echo("Loading labeled claims from database...")
+    db = SentinelDB(config.database.url)
+    db.connect()
+    claims = load_labeled_claims(db)
+    db.close()
+
+    if not claims:
+        click.echo("No labeled claims found. Run 'uv run collect' first.", err=True)
+        sys.exit(1)
+
+    # Split
+    split = prepare_split(claims, test_size=test_size, seed=seed)
+    click.echo(f"Data: {split.train_size} train, {split.test_size} test")
+
+    # Train
+    click.echo(f"Training {model.name}...")
+    metadata = model.train(split.train_texts, split.train_labels)
+    for key, value in metadata.items():
+        click.echo(f"  {key}: {value}")
+
+    # Save
+    model_dir = MODEL_DIR / model.name
+    model.save(model_dir)
+    click.echo(f"Saved to {model_dir}/")
+
+    # Quick evaluation on test set
+    from .models.evaluate import compute_metrics, format_metrics
+
+    predictions = model.predict_batch(split.test_texts)
+    metrics = compute_metrics(predictions, split.test_labels)
+    click.echo("")
+    click.echo("Test set results:")
+    click.echo(format_metrics(metrics))
+
+
+# ---------------------------------------------------------------------------
+# evaluate
+# ---------------------------------------------------------------------------
+
+@click.command()
+@click.argument("model_name")
+@click.option("--seed", default=42, type=int, help="Random seed (must match training)")
+@click.option("--test-size", default=0.2, type=float, help="Test fraction (must match training)")
+def evaluate(model_name: str, seed: int, test_size: float):
+    """Evaluate a trained model. Usage: uv run evaluate baseline"""
+    _init()
+
+    if not config.database.url:
+        click.echo("Error: DATABASE_URL not set.", err=True)
+        sys.exit(1)
+
+    from .data.db import SentinelDB
+    from .models.data import load_labeled_claims, prepare_split
+    from .models.evaluate import compute_metrics, format_metrics
+
+    model = _get_model(model_name)
+
+    # Load saved model
+    model_dir = MODEL_DIR / model.name
+    if not (model_dir / "model.json").exists():
+        click.echo(f"No trained model found at {model_dir}/. Run 'uv run train {model_name}' first.", err=True)
+        sys.exit(1)
+
+    model.load(model_dir)
+
+    # Load and split data (same seed = same split)
+    click.echo("Loading labeled claims from database...")
+    db = SentinelDB(config.database.url)
+    db.connect()
+    claims = load_labeled_claims(db)
+    db.close()
+
+    split = prepare_split(claims, test_size=test_size, seed=seed)
+    click.echo(f"Evaluating {model.name} on {split.test_size} test samples")
+    click.echo("")
+
+    predictions = model.predict_batch(split.test_texts)
+    metrics = compute_metrics(predictions, split.test_labels)
+    click.echo(format_metrics(metrics))
+
+
+# ---------------------------------------------------------------------------
+# predict
+# ---------------------------------------------------------------------------
+
+@click.command()
+@click.argument("model_name")
+@click.argument("text")
+def predict(model_name: str, text: str):
+    """Predict a label for tweet text. Usage: uv run predict baseline "tweet text" """
+    _init()
+
+    from .models import load_model
+
+    try:
+        model = load_model(model_name)
+    except KeyError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+    except FileNotFoundError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+
+    label = model.predict(text)
+    click.echo(f"{label}")

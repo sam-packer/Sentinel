@@ -50,7 +50,8 @@ DATABASE_URL=postgresql://sentinel:your-secure-password@localhost:5432/sentinel_
 
 ## 5. Add Twitter accounts
 
-Sentinel uses [twscrape](https://github.com/Telesphoreo/twscrape) for scraping. You need at least one Twitter/X account with exported cookies.
+Sentinel uses [twscrape](https://github.com/Telesphoreo/twscrape) for scraping. You need at least one Twitter/X account
+with exported cookies.
 
 1. Log into Twitter/X in your browser
 2. Export cookies as JSON using a browser extension (e.g., "Cookie-Editor")

@@ -34,6 +34,18 @@ def create_app(database_url: str | None = None) -> Flask:
 
     app.config["DATABASE_URL"] = database_url
 
+    # Load trained models into memory
+    from ..models import MODEL_REGISTRY, load_model
+
+    loaded_models = {}
+    for name in MODEL_REGISTRY:
+        try:
+            loaded_models[name] = load_model(name)
+            logger.info(f"Loaded model: {name}")
+        except FileNotFoundError:
+            logger.info(f"No trained model for '{name}', skipping")
+    app.config["MODELS"] = loaded_models
+
     # Register API routes
     from .routes import api_bp
     app.register_blueprint(api_bp, url_prefix="/api")

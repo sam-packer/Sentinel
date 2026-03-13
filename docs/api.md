@@ -18,7 +18,7 @@ uv run serve --workers 8                # custom worker count
 | `GET`  | `/api/feed`        | Paginated labeled claims, newest first |
 | `GET`  | `/api/feed/stream` | SSE stream of new claims               |
 | `GET`  | `/api/stats`       | Label distribution, top tickers        |
-| `POST` | `/api/analyze`     | Label a tweet using current price data |
+| `POST` | `/api/predict`     | ML model inference on tweet text       |
 
 ## GET /api/feed
 
@@ -58,45 +58,39 @@ curl http://localhost:5000/api/stats
 
 Returns the defense stock universe, all tracked tickers and company names.
 
-## POST /api/analyze
+## POST /api/predict
 
-Analyze a single tweet text against current market data.
+Classify tweet text using a trained ML model. Pure text-based inference, no price or news data needed. This is how you
+predict exaggerated vs accurate before the 24h price window elapses.
 
 Request body:
 
 ```json
 {
-  "tweet_text": "$LMT to the moon!",
-  "ticker": "LMT"
+  "text": "$LMT to the moon! 🚀🚀🚀",
+  "model": "baseline"
 }
 ```
 
-`ticker` is optional and will be resolved from the text if not provided.
-
-When `live_news_fetch` is enabled in config, the endpoint fetches current price and news before labeling.
+`model` is optional. If omitted, uses the first available trained model. Trained models are loaded into memory at
+server startup.
 
 Response:
 
 ```json
 {
-  "label": "exaggerated",
-  "confidence": 0.4,
-  "ticker": "LMT",
-  "company_name": "Lockheed Martin",
-  "claimed_direction": "up",
-  "actual_direction": "neutral",
-  "has_catalyst": false,
-  "catalyst_type": null,
-  "news_headlines": [],
-  "price_change_24h": 0.44,
-  "explanation": "Claim direction: up, actual: neutral. 24h price move: +0.44%. No news catalyst found. The claim overstates the move or lacks supporting evidence."
+  "label": "accurate",
+  "model": "baseline",
+  "available_models": [
+    "baseline"
+  ]
 }
 ```
 
 ```bash
-curl -X POST http://localhost:5000/api/analyze \
+curl -X POST http://localhost:5000/api/predict \
   -H "Content-Type: application/json" \
-  -d '{"tweet_text": "$LMT to the moon!", "ticker": "LMT"}'
+  -d '{"text": "$LMT to the moon!", "model": "baseline"}'
 ```
 
 ## GET /api/health
