@@ -142,7 +142,7 @@ class PriceFetcher:
             start = dt - timedelta(days=3)
             end = dt + timedelta(days=1)
 
-            hist, interval = self._fetch_candles(ticker, start, end)
+            hist, _interval = self._fetch_candles(ticker, start, end)
             if hist.empty:
                 logger.warning(f"No price data for {ticker} around {dt}")
                 return None
@@ -184,7 +184,7 @@ class PriceFetcher:
             start = dt - timedelta(hours=1)  # small lookback for near-exact matches
             end = dt + timedelta(days=5)     # cover long weekends / holidays
 
-            hist, interval = self._fetch_candles(ticker, start, end)
+            hist, _interval = self._fetch_candles(ticker, start, end)
             if hist.empty:
                 logger.warning(f"No price data for {ticker} after {dt}")
                 return None

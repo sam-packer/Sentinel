@@ -1,7 +1,5 @@
 """Tests for the naive baseline model."""
 
-from pathlib import Path
-
 from src.models.baseline import MajorityClassModel
 from src.models.evaluate import compute_metrics, format_metrics
 from src.models.data import prepare_split
@@ -44,7 +42,7 @@ class TestMajorityClassModel:
         loaded = MajorityClassModel()
         loaded.load(tmp_path / "baseline")
         assert loaded.predict("test") == "accurate"
-        assert loaded._class_counts == {"accurate": 2, "exaggerated": 1}
+        assert loaded._class_counts == {"accurate": 2, "exaggerated": 1}  # pylint: disable=protected-access
 
 
 class TestComputeMetrics:

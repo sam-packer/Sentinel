@@ -5,7 +5,7 @@ from datetime import datetime
 from src.data.models import RawClaim, LabeledClaim
 
 
-def make_raw_claim(
+def make_raw_claim(  # pylint: disable=too-many-arguments
     tweet_id: int = 1234567890,
     text: str = "$LMT looking bullish! 🚀 Lockheed just got a huge contract",
     username: str = "defensetrader",

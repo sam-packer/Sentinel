@@ -27,13 +27,13 @@ from pathlib import Path
 import click
 
 from .config import config
+from .models import MODEL_REGISTRY, MODEL_DIR
 
 # US Eastern timezone (ET) for market hours
 try:
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("America/New_York")
 except ImportError:
-    from datetime import tzinfo
     # Fallback: EST = UTC-5 (ignores DST)
     ET = timezone(timedelta(hours=-5))
 
@@ -290,7 +290,6 @@ def collect(
         import subprocess
 
         Path("data").mkdir(parents=True, exist_ok=True)
-        log_file = open("data/collect.log", "w")
 
         collect_bin = shutil.which("collect")
         if collect_bin is None:
@@ -300,7 +299,8 @@ def collect(
         if tickers:
             cmd.extend(["--tickers", tickers])
 
-        proc = subprocess.Popen(
+        log_file = open("data/collect.log", "w")  # pylint: disable=consider-using-with
+        proc = subprocess.Popen(  # pylint: disable=consider-using-with
             cmd,
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -393,7 +393,6 @@ def enrich(
         import subprocess
 
         Path("data").mkdir(parents=True, exist_ok=True)
-        log_file = open("data/enrich.log", "w")
 
         enrich_bin = shutil.which("enrich")
         if enrich_bin is None:
@@ -407,7 +406,8 @@ def enrich(
         if unlabeled:
             cmd.append("--unlabeled")
 
-        proc = subprocess.Popen(
+        log_file = open("data/enrich.log", "w")  # pylint: disable=consider-using-with
+        proc = subprocess.Popen(  # pylint: disable=consider-using-with
             cmd,
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -482,8 +482,6 @@ def serve(host: str, port: int | None, workers: int, dev: bool):
 # ---------------------------------------------------------------------------
 # Model helpers
 # ---------------------------------------------------------------------------
-
-from .models import MODEL_REGISTRY, MODEL_DIR
 
 
 def _get_model(name: str):

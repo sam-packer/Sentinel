@@ -30,8 +30,8 @@ def _get_db() -> SentinelDB:
     if not hasattr(current_app, "_sentinel_db"):
         db = SentinelDB(current_app.config["DATABASE_URL"])
         db.connect()
-        current_app._sentinel_db = db
-    return current_app._sentinel_db
+        current_app._sentinel_db = db  # pylint: disable=protected-access
+    return current_app._sentinel_db  # pylint: disable=protected-access
 
 
 @api_bp.route("/health", methods=["GET"])

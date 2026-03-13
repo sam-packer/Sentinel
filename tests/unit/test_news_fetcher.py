@@ -1,7 +1,8 @@
 """Tests for defense news fetcher."""
 
-import pytest
 from datetime import datetime, timezone
+
+import pytest
 
 from src.news_fetcher import classify_catalyst, _parse_article_age_hours, _filter_by_window
 
@@ -101,4 +102,4 @@ class TestFilterByWindow:
     def test_empty_articles(self):
         tweet_time = datetime(2024, 6, 15, 14, 0, tzinfo=timezone.utc)
         result = _filter_by_window([], tweet_time, window_hours=48)
-        assert result == []
+        assert not result

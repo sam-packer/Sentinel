@@ -20,7 +20,7 @@ class TestRawClaim:
             ticker="BA", company_name="Boeing",
         )
         assert claim.price_at_tweet is None
-        assert claim.news_headlines == []
+        assert not claim.news_headlines
         assert claim.has_catalyst is False
         assert claim.catalyst_type is None
 

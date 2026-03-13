@@ -1,7 +1,6 @@
 """Tests for Sentinel configuration."""
 
 import logging
-from unittest.mock import patch
 
 from src.config import (
     Config, LabelingConfig, AppConfig,
@@ -74,9 +73,9 @@ class TestWorkerLogFilter:
         )
 
         filter_instance.filter(record)
-        assert record.worker_info == ""
+        assert record.worker_info == ""  # pylint: disable=no-member
 
         worker_context.set(5)
         filter_instance.filter(record)
-        assert record.worker_info == " [Worker 5]"
+        assert record.worker_info == " [Worker 5]"  # pylint: disable=no-member
         worker_context.set(None)

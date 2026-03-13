@@ -347,8 +347,6 @@ async def run_collection(
         _pid_file(name).unlink(missing_ok=True)
         logger.info(f"Collection complete: {status.labeled} labeled, {status.failed} failed")
 
-    except SystemExit:
-        raise
     except Exception as e:
         status.state = "failed"
         status.error = str(e)
@@ -430,8 +428,6 @@ async def run_enrichment(
         _pid_file(name).unlink(missing_ok=True)
         logger.info(f"Enrichment complete: {status.labeled} labeled, {status.failed} failed")
 
-    except SystemExit:
-        raise
     except Exception as e:
         status.state = "failed"
         status.error = str(e)

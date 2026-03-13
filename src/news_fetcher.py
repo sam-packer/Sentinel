@@ -7,7 +7,7 @@ and DuckDuckGo news search. Classifies news catalysts by type.
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from dateutil import parser as dateutil_parser
 

@@ -6,7 +6,6 @@ moves, and classifies claims as exaggerated, accurate, or understated.
 """
 
 import logging
-import re
 from typing import Literal
 
 from .models import RawClaim, LabeledClaim

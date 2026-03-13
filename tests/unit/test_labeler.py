@@ -1,7 +1,5 @@
 """Tests for claim labeling logic."""
 
-import pytest
-
 from src.data.labeler import parse_direction, label_claim, compute_exaggeration_score
 from tests.fixtures import make_raw_claim
 
