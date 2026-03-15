@@ -229,20 +229,43 @@ uv run serve --dev                 # Flask dev server with hot reload
 Trains a model on labeled claims from the database. Loads data, splits into train/test sets with a fixed seed, trains,
 saves the model to `models/<name>/`, and prints test set metrics.
 
+Available models:
+- `baseline` — Naive majority class predictor. Always predicts the most common label (~78% accuracy, 0% exaggeration recall). The floor any real model must beat.
+- `classical` — Optuna-tuned TF-IDF + logistic regression. 200 Optuna trials with stratified 3-fold CV optimizing macro F1. Saves model weights, TF-IDF vectorizer, and top predictive words for interpretability.
+- `neural` — Fine-tuned BERTweet (vinai/bertweet-base). 50 Optuna trials with stratified 3-fold CV optimizing macro F1. Tunes learning rate, weight decay, warmup, epochs, batch size, and dropout. Requires GPU.
+
 ```bash
 uv run train baseline              # train the majority-class baseline
-uv run train baseline --seed 99    # different random split
-uv run train baseline --test-size 0.3  # 30% test set instead of 20%
+uv run train classical             # train classical model (LR + XGBoost, ~200 Optuna trials each)
+uv run train classical --seed 99   # different random split
+uv run train classical --test-size 0.3  # 30% test set instead of 20%
+```
+
+Model artifacts are saved to `models/<name>/`:
+
+```
+models/
+├── baseline/
+│   └── model.json              # majority class + class counts
+├── classical/
+│   ├── lr.pkl                  # logistic regression weights
+│   ├── tfidf.pkl               # TF-IDF vectorizer (vocabulary + weights)
+│   └── model.json              # hyperparams, top predictive words
+└── neural/
+    ├── model/                  # BERTweet fine-tuned weights (safetensors)
+    ├── tokenizer/              # BERTweet tokenizer files
+    └── model.json              # hyperparams, training metadata
 ```
 
 ### evaluate
 
 Evaluates a previously trained model on the test set. Uses the same seed and split as training so the test data
-matches.
+matches. Reports accuracy, per-class precision/recall/F1, and confusion matrix.
 
 ```bash
 uv run evaluate baseline           # evaluate saved baseline model
-uv run evaluate baseline --seed 99 # must match the seed used during training
+uv run evaluate classical          # evaluate classical ensemble
+uv run evaluate classical --seed 99 # must match the seed used during training
 ```
 
 ### predict
