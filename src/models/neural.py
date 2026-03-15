@@ -17,13 +17,18 @@ from pathlib import Path
 
 import numpy as np
 import optuna
-import torch
-import transformers
+try:
+    import torch
+    import transformers
+    from torch import nn
+    from torch.utils.data import DataLoader, Dataset
+    from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
+    _TORCH_IMPORT_ERROR = None
+except ImportError as _torch_err:
+    torch = None
+    _TORCH_IMPORT_ERROR = _torch_err
 from sklearn.metrics import f1_score
 from sklearn.model_selection import StratifiedKFold
-from torch import nn
-from torch.utils.data import DataLoader, Dataset
-from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 
 from . import BaseModel
 
@@ -35,8 +40,9 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 logging.getLogger("transformers").setLevel(logging.ERROR)
-transformers.logging.set_verbosity_error()
-transformers.logging.disable_progress_bar()
+if torch is not None:
+    transformers.logging.set_verbosity_error()
+    transformers.logging.disable_progress_bar()
 
 # Reproducibility
 SEED = 42
@@ -283,6 +289,11 @@ class NeuralModel(BaseModel):
     """Fine-tuned BERTweet for tweet exaggeration classification."""
 
     def __init__(self):
+        if torch is None:
+            raise ImportError(
+                "NeuralModel requires PyTorch and transformers. "
+                "Install with: uv sync --extra cuda"
+            ) from _TORCH_IMPORT_ERROR
         self._model = None
         self._tokenizer = None
         self._device: torch.device | None = None
