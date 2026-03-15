@@ -9,6 +9,7 @@ description = "Defense Stock Claim Analyzer — classifies social media claims a
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "anthropic>=0.52.0",
     "click>=8.3.1",
     "ddgs>=9.11.4",
     "emoji>=2.15.0",
@@ -34,6 +35,7 @@ dependencies = [
 setup = "src.cli:setup"
 collect = "src.cli:collect"
 enrich = "src.cli:enrich"
+classify = "src.cli:classify"
 serve = "src.cli:serve"
 train = "src.cli:train"
 evaluate = "src.cli:evaluate"

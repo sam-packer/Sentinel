@@ -45,6 +45,24 @@ def _init():
     config.setup_logging()
 
 
+def _launch_background(cmd: list[str], log_path: str) -> int:
+    """Launch a command as a detached background process, logging to a file.
+
+    Returns the PID of the spawned process.
+    """
+    import subprocess
+
+    Path("data").mkdir(parents=True, exist_ok=True)
+    with open(log_path, "w") as log_file:
+        with subprocess.Popen(
+            cmd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        ) as proc:
+            return proc.pid
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers for --status and --stop
 # ---------------------------------------------------------------------------
@@ -287,9 +305,6 @@ def collect(
             sys.exit(1)
 
         import shutil
-        import subprocess
-
-        Path("data").mkdir(parents=True, exist_ok=True)
 
         collect_bin = shutil.which("collect")
         if collect_bin is None:
@@ -299,14 +314,8 @@ def collect(
         if tickers:
             cmd.extend(["--tickers", tickers])
 
-        log_file = open("data/collect.log", "w")  # pylint: disable=consider-using-with
-        proc = subprocess.Popen(  # pylint: disable=consider-using-with
-            cmd,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        click.echo(f"Collection started in background (PID {proc.pid})")
+        pid = _launch_background(cmd, "data/collect.log")
+        click.echo(f"Collection started in background (PID {pid})")
         click.echo("  uv run collect --status  — check progress")
         click.echo("  uv run collect --stop    — stop collection")
         return
@@ -390,9 +399,6 @@ def enrich(
             sys.exit(1)
 
         import shutil
-        import subprocess
-
-        Path("data").mkdir(parents=True, exist_ok=True)
 
         enrich_bin = shutil.which("enrich")
         if enrich_bin is None:
@@ -406,14 +412,8 @@ def enrich(
         if unlabeled:
             cmd.append("--unlabeled")
 
-        log_file = open("data/enrich.log", "w")  # pylint: disable=consider-using-with
-        proc = subprocess.Popen(  # pylint: disable=consider-using-with
-            cmd,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        click.echo(f"Enrichment started in background (PID {proc.pid})")
+        pid = _launch_background(cmd, "data/enrich.log")
+        click.echo(f"Enrichment started in background (PID {pid})")
         click.echo("  uv run enrich --status  — check progress")
         click.echo("  uv run enrich --stop    — stop enrichment")
         return
@@ -444,6 +444,80 @@ def enrich(
         st = read_status("enrich")
         if st:
             click.echo(f"Done: {st.labeled} labeled, {st.failed} failed")
+
+
+# ---------------------------------------------------------------------------
+# classify
+# ---------------------------------------------------------------------------
+
+@click.command()
+@click.option("--limit", default=100, type=int, help="Max accounts to classify")
+@click.option("--reclassify", is_flag=True, help="Reclassify already-classified accounts")
+def classify(limit: int, reclassify: bool):
+    """Classify accounts as human or bot using LLM-as-judge.
+
+    Primarily for catch-up classification of existing accounts.
+    New accounts are automatically classified during collection."""
+    _init()
+
+    if not config.database.url:
+        click.echo("Error: DATABASE_URL not set.", err=True)
+        sys.exit(1)
+
+    from .bot_detector import classify_accounts_batch
+    from .data.db import SentinelDB
+    from .data.models import Account
+
+    db = SentinelDB(config.database.url)
+    db.connect()
+
+    # Get unclassified accounts with sample tweets
+    if reclassify:
+        accounts_data = db.get_all_accounts_with_tweets(limit=limit)
+        rows = [(a["username"], a["sample_tweets"]) for a in accounts_data]
+    else:
+        accounts_data = db.get_unclassified_accounts(limit=limit)
+        rows = [(a["username"], a["sample_tweets"]) for a in accounts_data]
+
+    if not rows:
+        click.echo("No accounts to classify.")
+        db.close()
+        return
+
+    click.echo(f"Classifying {len(rows)} accounts...")
+
+    # Prepare batch input
+    batch = []
+    for username, tweets in rows:
+        # Take up to 5 sample tweets
+        sample = tweets[:5] if isinstance(tweets, list) else [tweets]
+        batch.append({"username": username, "sample_tweets": sample})
+
+    # Run classification
+    results = classify_accounts_batch(batch)
+
+    # Save results
+    classified = 0
+    bots_found = 0
+    for username, classification in results:
+        account = db.get_account(username) or Account(username=username)
+        account.account_type = classification.account_type
+        account.classification_reason = f"{classification.account_type}: {classification.reason}"
+        account.classified_at = datetime.now(timezone.utc)
+        db.upsert_account(account)
+
+        if classification.is_filtered:
+            bots_found += 1
+        classified += 1
+
+        click.echo(
+            f"  @{username}: {classification.account_type.upper()} "
+            f"({classification.confidence:.0%}) "
+            f"— {classification.reason}"
+        )
+
+    db.close()
+    click.echo(f"\nDone: {classified} classified, {bots_found} filtered (bot/garbage)")
 
 
 # ---------------------------------------------------------------------------

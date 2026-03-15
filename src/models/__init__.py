@@ -71,6 +71,14 @@ class BaseModel(ABC):
             'exaggerated' or 'accurate'.
         """
 
+    def predict_proba(self, text: str) -> dict:
+        """Predict label with confidence score.
+
+        Returns:
+            Dict with 'label' (str) and 'confidence' (float 0.0-1.0).
+        """
+        return {"label": self.predict(text), "confidence": 1.0}
+
     def predict_batch(self, texts: list[str]) -> list[str]:
         """Predict labels for multiple tweets. Override for efficiency."""
         return [self.predict(text) for text in texts]

@@ -25,6 +25,7 @@ class PriceMove(NamedTuple):
     price_at: float | None
     price_after: float | None
     change_pct: float | None
+    volume_at_tweet: float | None = None
 
 
 class PriceFetcher:
@@ -112,6 +113,21 @@ class PriceFetcher:
         deltas = abs(idx - target)
         closest_idx = deltas.argmin()
         return float(hist.iloc[closest_idx]["Close"])
+
+    def _volume_at_time(
+        self, hist: pd.DataFrame, target_ts: datetime, window_minutes: int = 30,
+    ) -> float | None:
+        """Get total volume within +/- window_minutes/2 of target_ts."""
+        target = target_ts.replace(tzinfo=timezone.utc) if target_ts.tzinfo is None else target_ts
+        idx = self._ensure_utc_index(hist)
+
+        half_window = timedelta(minutes=window_minutes / 2)
+        mask = (idx >= target - half_window) & (idx <= target + half_window)
+        subset = hist.loc[mask]
+
+        if len(subset) > 0 and "Volume" in subset.columns:
+            return float(subset["Volume"].sum())
+        return None
 
     def get_price_at_time(
         self, ticker: str, dt: datetime, window_minutes: int = 30,
@@ -246,7 +262,19 @@ class PriceFetcher:
             return PriceMove(price_at, None, None)
 
         change_pct = ((price_after - price_at) / price_at) * 100
-        return PriceMove(price_at, price_after, round(change_pct, 4))
+
+        # Capture volume at tweet time
+        volume = None
+        try:
+            start = dt - timedelta(days=3)
+            end = dt + timedelta(days=1)
+            hist, _interval = self._fetch_candles(ticker, start, end)
+            if not hist.empty:
+                volume = self._volume_at_time(hist, dt, window_minutes)
+        except Exception:
+            pass  # volume is nice-to-have, don't fail the whole enrichment
+
+        return PriceMove(price_at, price_after, round(change_pct, 4), volume)
 
     def get_current_price(self, ticker: str) -> float | None:
         """Get the latest available price for a ticker."""

@@ -23,12 +23,17 @@ class RawClaim:
     retweets: int
     ticker: str
     company_name: str
+    replies: int = 0
+    views: int | None = None
+    hashtags: list[str] = field(default_factory=list)
     price_at_tweet: float | None = None
     price_24h_later: float | None = None
     price_change_pct: float | None = None
     news_headlines: list[str] = field(default_factory=list)
     has_catalyst: bool = False
     catalyst_type: str | None = None  # "contract" | "geopolitical" | "earnings" | "budget"
+    posted_during_market_hours: bool | None = None
+    volume_at_tweet: float | None = None
 
 
 @dataclass
@@ -54,6 +59,11 @@ class LabeledClaim:
     actual_direction: Literal["up", "down", "neutral"]
     exaggeration_score: float  # 0.0 (perfectly accurate) to 1.0 (wildly off)
     news_summary: str  # one-line top headline for display
+    replies: int = 0
+    views: int | None = None
+    hashtags: list[str] = field(default_factory=list)
+    posted_during_market_hours: bool | None = None
+    volume_at_tweet: float | None = None
 
     @classmethod
     def from_raw(
@@ -74,6 +84,9 @@ class LabeledClaim:
             created_at=raw.created_at,
             likes=raw.likes,
             retweets=raw.retweets,
+            replies=raw.replies,
+            views=raw.views,
+            hashtags=raw.hashtags,
             ticker=raw.ticker,
             company_name=raw.company_name,
             price_at_tweet=raw.price_at_tweet,
@@ -82,9 +95,27 @@ class LabeledClaim:
             news_headlines=raw.news_headlines,
             has_catalyst=raw.has_catalyst,
             catalyst_type=raw.catalyst_type,
+            posted_during_market_hours=raw.posted_during_market_hours,
+            volume_at_tweet=raw.volume_at_tweet,
             label=label,
             claimed_direction=claimed_direction,
             actual_direction=actual_direction,
             exaggeration_score=exaggeration_score,
             news_summary=news_summary,
         )
+
+
+@dataclass
+class Account:
+    """A Twitter account with bot classification and credibility scoring."""
+    username: str
+    account_type: str = "human"  # "human", "bot", "garbage"
+    classification_reason: str | None = None
+    total_claims: int = 0
+    exaggerated_count: int = 0
+    accurate_count: int = 0
+    understated_count: int = 0
+    grifter_score: float | None = None  # null if < 5 claims
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
+    classified_at: datetime | None = None

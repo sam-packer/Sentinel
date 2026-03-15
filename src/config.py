@@ -106,12 +106,24 @@ class AppConfig:
 
 
 @dataclass
+class BotDetectionConfig:
+    """Bot detection settings."""
+    enabled: bool = field(
+        default_factory=lambda: _get_yaml("bot_detection", "enabled", True)
+    )
+    model: str = field(
+        default_factory=lambda: _get_yaml("bot_detection", "model", "claude-haiku-4-5-20251001")
+    )
+
+
+@dataclass
 class Config:
     """Main configuration container for Sentinel."""
     twitter: TwitterConfig = field(default_factory=TwitterConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     labeling: LabelingConfig = field(default_factory=LabelingConfig)
     app: AppConfig = field(default_factory=AppConfig)
+    bot_detection: BotDetectionConfig = field(default_factory=BotDetectionConfig)
 
     def setup_logging(self) -> logging.Logger:
         """Configure and return the application logger."""

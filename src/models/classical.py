@@ -202,6 +202,20 @@ class ClassicalModel(BaseModel):
         X = self._tfidf.transform([text])
         return str(self._lr.predict(X)[0])
 
+    def predict_proba(self, text: str) -> dict:
+        """Predict label with confidence from logistic regression probabilities."""
+        if self._lr is None:
+            raise RuntimeError(
+                "Model has not been trained. Run 'uv run train classical' first."
+            )
+        X = self._tfidf.transform([text])
+        probas = self._lr.predict_proba(X)[0]
+        label_idx = probas.argmax()
+        return {
+            "label": str(self._lr.classes_[label_idx]),
+            "confidence": round(float(probas[label_idx]), 4),
+        }
+
     def predict_batch(self, texts: list[str]) -> list[str]:
         if self._lr is None:
             raise RuntimeError(

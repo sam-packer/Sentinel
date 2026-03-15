@@ -11,7 +11,7 @@ from datetime import datetime
 
 import psycopg
 
-from .models import RawClaim, LabeledClaim
+from .models import RawClaim, LabeledClaim, Account
 
 logger = logging.getLogger("sentinel.db")
 
@@ -23,6 +23,9 @@ CREATE TABLE IF NOT EXISTS raw_claims (
     created_at TIMESTAMPTZ NOT NULL,
     likes INTEGER DEFAULT 0,
     retweets INTEGER DEFAULT 0,
+    replies INTEGER DEFAULT 0,
+    views INTEGER,
+    hashtags JSONB DEFAULT '[]',
     ticker VARCHAR(10) NOT NULL,
     company_name VARCHAR(255) NOT NULL,
     price_at_tweet DOUBLE PRECISION,
@@ -31,6 +34,8 @@ CREATE TABLE IF NOT EXISTS raw_claims (
     news_headlines JSONB DEFAULT '[]',
     has_catalyst BOOLEAN DEFAULT FALSE,
     catalyst_type VARCHAR(20),
+    posted_during_market_hours BOOLEAN,
+    volume_at_tweet DOUBLE PRECISION,
     scraped_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -48,10 +53,28 @@ CREATE INDEX IF NOT EXISTS idx_labeled_claims_label ON labeled_claims(label);
 CREATE INDEX IF NOT EXISTS idx_labeled_claims_labeled_at ON labeled_claims(labeled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_raw_claims_ticker ON raw_claims(ticker);
 CREATE INDEX IF NOT EXISTS idx_raw_claims_created_at ON raw_claims(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS accounts (
+    username VARCHAR(255) PRIMARY KEY,
+    account_type VARCHAR(10) DEFAULT 'human',
+    classification_reason VARCHAR(255),
+    total_claims INTEGER DEFAULT 0,
+    exaggerated_count INTEGER DEFAULT 0,
+    accurate_count INTEGER DEFAULT 0,
+    understated_count INTEGER DEFAULT 0,
+    grifter_score DOUBLE PRECISION,
+    first_seen TIMESTAMPTZ,
+    last_seen TIMESTAMPTZ,
+    classified_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_accounts_grifter_score ON accounts(grifter_score);
+CREATE INDEX IF NOT EXISTS idx_accounts_account_type ON accounts(account_type);
+CREATE INDEX IF NOT EXISTS idx_accounts_total_claims ON accounts(total_claims DESC);
 """
 
 
-class SentinelDB:  # pylint: disable=no-member
+class SentinelDB:
     """PostgreSQL database interface for Sentinel."""
 
     def __init__(self, database_url: str):
@@ -93,6 +116,18 @@ class SentinelDB:  # pylint: disable=no-member
             return True
         except Exception:
             return False
+
+    def execute_query(self, query: str, params: list | None = None) -> tuple[list[str], list[tuple]]:
+        """Execute a read query and return (column_names, rows).
+
+        For use by modules that need custom queries without direct connection access.
+        """
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(query, params or [])
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+        return columns, rows
 
     def claim_exists(self, tweet_id: int) -> bool:
         """Check if a tweet has already been stored."""
@@ -162,6 +197,9 @@ class SentinelDB:  # pylint: disable=no-member
             headlines = d.get("news_headlines", [])
             if isinstance(headlines, str):
                 headlines = json.loads(headlines)
+            hashtags_raw = d.get("hashtags", [])
+            if isinstance(hashtags_raw, str):
+                hashtags_raw = json.loads(hashtags_raw)
             claims.append(RawClaim(
                 tweet_id=d["tweet_id"],
                 text=d["text"],
@@ -169,6 +207,9 @@ class SentinelDB:  # pylint: disable=no-member
                 created_at=d["created_at"],
                 likes=d.get("likes", 0),
                 retweets=d.get("retweets", 0),
+                replies=d.get("replies", 0),
+                views=d.get("views"),
+                hashtags=hashtags_raw,
                 ticker=d["ticker"],
                 company_name=d["company_name"],
                 price_at_tweet=d.get("price_at_tweet"),
@@ -177,6 +218,8 @@ class SentinelDB:  # pylint: disable=no-member
                 news_headlines=headlines,
                 has_catalyst=d.get("has_catalyst", False),
                 catalyst_type=d.get("catalyst_type"),
+                posted_during_market_hours=d.get("posted_during_market_hours"),
+                volume_at_tweet=d.get("volume_at_tweet"),
             ))
         return claims
 
@@ -188,19 +231,24 @@ class SentinelDB:  # pylint: disable=no-member
                 """
                 INSERT INTO raw_claims
                     (tweet_id, text, username, created_at, likes, retweets,
+                     replies, views, hashtags,
                      ticker, company_name, price_at_tweet, price_24h_later,
-                     price_change_pct, news_headlines, has_catalyst, catalyst_type)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     price_change_pct, news_headlines, has_catalyst, catalyst_type,
+                     posted_during_market_hours, volume_at_tweet)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (tweet_id) DO NOTHING
                 """,
                 (
                     claim.tweet_id, claim.text, claim.username,
                     claim.created_at, claim.likes, claim.retweets,
+                    claim.replies, claim.views,
+                    json.dumps(claim.hashtags),
                     claim.ticker, claim.company_name,
                     claim.price_at_tweet, claim.price_24h_later,
                     claim.price_change_pct,
                     json.dumps(claim.news_headlines),
                     claim.has_catalyst, claim.catalyst_type,
+                    claim.posted_during_market_hours, claim.volume_at_tweet,
                 ),
             )
         conn.commit()
@@ -214,25 +262,35 @@ class SentinelDB:  # pylint: disable=no-member
                 """
                 INSERT INTO raw_claims
                     (tweet_id, text, username, created_at, likes, retweets,
+                     replies, views, hashtags,
                      ticker, company_name, price_at_tweet, price_24h_later,
-                     price_change_pct, news_headlines, has_catalyst, catalyst_type)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     price_change_pct, news_headlines, has_catalyst, catalyst_type,
+                     posted_during_market_hours, volume_at_tweet)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (tweet_id) DO UPDATE SET
+                    replies = EXCLUDED.replies,
+                    views = EXCLUDED.views,
+                    hashtags = EXCLUDED.hashtags,
                     price_at_tweet = EXCLUDED.price_at_tweet,
                     price_24h_later = EXCLUDED.price_24h_later,
                     price_change_pct = EXCLUDED.price_change_pct,
                     news_headlines = EXCLUDED.news_headlines,
                     has_catalyst = EXCLUDED.has_catalyst,
-                    catalyst_type = EXCLUDED.catalyst_type
+                    catalyst_type = EXCLUDED.catalyst_type,
+                    posted_during_market_hours = EXCLUDED.posted_during_market_hours,
+                    volume_at_tweet = EXCLUDED.volume_at_tweet
                 """,
                 (
                     labeled.tweet_id, labeled.text, labeled.username,
                     labeled.created_at, labeled.likes, labeled.retweets,
+                    labeled.replies, labeled.views,
+                    json.dumps(labeled.hashtags),
                     labeled.ticker, labeled.company_name,
                     labeled.price_at_tweet, labeled.price_24h_later,
                     labeled.price_change_pct,
                     json.dumps(labeled.news_headlines),
                     labeled.has_catalyst, labeled.catalyst_type,
+                    labeled.posted_during_market_hours, labeled.volume_at_tweet,
                 ),
             )
             # Upsert the label
@@ -257,6 +315,7 @@ class SentinelDB:  # pylint: disable=no-member
                 ),
             )
         conn.commit()
+        self.update_account_scores(labeled.username)
 
     def get_feed(
         self,
@@ -277,9 +336,11 @@ class SentinelDB:  # pylint: disable=no-member
         conn = self._get_conn()
         query = """
             SELECT r.tweet_id, r.text, r.username, r.created_at,
-                   r.likes, r.retweets, r.ticker, r.company_name,
+                   r.likes, r.retweets, r.replies, r.views, r.hashtags,
+                   r.ticker, r.company_name,
                    r.price_at_tweet, r.price_24h_later, r.price_change_pct,
                    r.news_headlines, r.has_catalyst, r.catalyst_type,
+                   r.posted_during_market_hours, r.volume_at_tweet,
                    l.label, l.claimed_direction, l.actual_direction,
                    l.exaggeration_score, l.news_summary, l.labeled_at
             FROM labeled_claims l
@@ -303,6 +364,8 @@ class SentinelDB:  # pylint: disable=no-member
             # Parse JSON fields
             if isinstance(d.get("news_headlines"), str):
                 d["news_headlines"] = json.loads(d["news_headlines"])
+            if isinstance(d.get("hashtags"), str):
+                d["hashtags"] = json.loads(d["hashtags"])
             # Serialize datetimes
             for key in ("created_at", "labeled_at"):
                 if isinstance(d.get(key), datetime):
@@ -396,9 +459,11 @@ class SentinelDB:  # pylint: disable=no-member
         conn = self._get_conn()
         query = """
             SELECT r.tweet_id, r.text, r.username, r.created_at,
-                   r.likes, r.retweets, r.ticker, r.company_name,
+                   r.likes, r.retweets, r.replies, r.views, r.hashtags,
+                   r.ticker, r.company_name,
                    r.price_at_tweet, r.price_24h_later, r.price_change_pct,
                    r.news_headlines, r.has_catalyst, r.catalyst_type,
+                   r.posted_during_market_hours, r.volume_at_tweet,
                    l.label, l.claimed_direction, l.actual_direction,
                    l.exaggeration_score, l.news_summary, l.labeled_at
             FROM labeled_claims l
@@ -418,8 +483,428 @@ class SentinelDB:  # pylint: disable=no-member
             d = dict(zip(columns, row))
             if isinstance(d.get("news_headlines"), str):
                 d["news_headlines"] = json.loads(d["news_headlines"])
+            if isinstance(d.get("hashtags"), str):
+                d["hashtags"] = json.loads(d["hashtags"])
             for key in ("created_at", "labeled_at"):
                 if isinstance(d.get(key), datetime):
                     d[key] = d[key].isoformat()
             results.append(d)
         return results
+
+    def upsert_account(self, account: Account) -> None:
+        """Insert or update an account record."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO accounts
+                    (username, account_type, classification_reason, total_claims,
+                     exaggerated_count, accurate_count, understated_count,
+                     grifter_score, first_seen, last_seen, classified_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (username) DO UPDATE SET
+                    account_type = EXCLUDED.account_type,
+                    classification_reason = EXCLUDED.classification_reason,
+                    total_claims = EXCLUDED.total_claims,
+                    exaggerated_count = EXCLUDED.exaggerated_count,
+                    accurate_count = EXCLUDED.accurate_count,
+                    understated_count = EXCLUDED.understated_count,
+                    grifter_score = EXCLUDED.grifter_score,
+                    first_seen = EXCLUDED.first_seen,
+                    last_seen = EXCLUDED.last_seen,
+                    classified_at = EXCLUDED.classified_at
+                """,
+                (
+                    account.username, account.account_type, account.classification_reason,
+                    account.total_claims, account.exaggerated_count,
+                    account.accurate_count, account.understated_count,
+                    account.grifter_score, account.first_seen,
+                    account.last_seen, account.classified_at,
+                ),
+            )
+        conn.commit()
+
+    def get_account(self, username: str) -> Account | None:
+        """Get a single account by username."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM accounts WHERE username = %s", (username,))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            columns = [desc[0] for desc in cur.description]
+            d = dict(zip(columns, row))
+        return Account(
+            username=d["username"],
+            account_type=d.get("account_type", "human"),
+            classification_reason=d.get("classification_reason"),
+            total_claims=d.get("total_claims", 0),
+            exaggerated_count=d.get("exaggerated_count", 0),
+            accurate_count=d.get("accurate_count", 0),
+            understated_count=d.get("understated_count", 0),
+            grifter_score=d.get("grifter_score"),
+            first_seen=d.get("first_seen"),
+            last_seen=d.get("last_seen"),
+            classified_at=d.get("classified_at"),
+        )
+
+    def get_accounts(
+        self,
+        sort_by: str = "grifter_score",
+        order: str = "desc",
+        min_claims: int = 0,
+        account_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Account]:
+        """Get paginated, filterable, sortable account list."""
+        allowed_sort = {"grifter_score", "total_claims", "username", "last_seen"}
+        if sort_by not in allowed_sort:
+            sort_by = "grifter_score"
+        order_dir = "ASC" if order.lower() == "asc" else "DESC"
+
+        query = "SELECT * FROM accounts WHERE total_claims >= %s"
+        params: list = [min_claims]
+
+        if account_type is not None:
+            query += " AND account_type = %s"
+            params.append(account_type)
+
+        query += f" ORDER BY {sort_by} {order_dir} NULLS LAST"
+        query += " LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
+
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+
+        accounts = []
+        for row in rows:
+            d = dict(zip(columns, row))
+            accounts.append(Account(
+                username=d["username"],
+                account_type=d.get("account_type", "human"),
+                classification_reason=d.get("classification_reason"),
+                total_claims=d.get("total_claims", 0),
+                exaggerated_count=d.get("exaggerated_count", 0),
+                accurate_count=d.get("accurate_count", 0),
+                understated_count=d.get("understated_count", 0),
+                grifter_score=d.get("grifter_score"),
+                first_seen=d.get("first_seen"),
+                last_seen=d.get("last_seen"),
+                classified_at=d.get("classified_at"),
+            ))
+        return accounts
+
+    def update_account_scores(self, username: str) -> None:
+        """Recalculate account stats from actual labeled claim data."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN l.label = 'exaggerated' THEN 1 ELSE 0 END) as exaggerated,
+                    SUM(CASE WHEN l.label = 'accurate' THEN 1 ELSE 0 END) as accurate,
+                    SUM(CASE WHEN l.label = 'understated' THEN 1 ELSE 0 END) as understated,
+                    MIN(r.created_at) as first_seen,
+                    MAX(r.created_at) as last_seen
+                FROM raw_claims r
+                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                WHERE r.username = %s
+                """,
+                (username,),
+            )
+            row = cur.fetchone()
+
+        total = row[0] or 0
+        exaggerated = row[1] or 0
+        accurate = row[2] or 0
+        understated = row[3] or 0
+        first_seen = row[4]
+        last_seen = row[5]
+        grifter_score = exaggerated / total if total >= 5 else None
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO accounts
+                    (username, total_claims, exaggerated_count, accurate_count,
+                     understated_count, grifter_score, first_seen, last_seen)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (username) DO UPDATE SET
+                    total_claims = EXCLUDED.total_claims,
+                    exaggerated_count = EXCLUDED.exaggerated_count,
+                    accurate_count = EXCLUDED.accurate_count,
+                    understated_count = EXCLUDED.understated_count,
+                    grifter_score = EXCLUDED.grifter_score,
+                    first_seen = EXCLUDED.first_seen,
+                    last_seen = EXCLUDED.last_seen
+                """,
+                (
+                    username, total, exaggerated, accurate,
+                    understated, grifter_score, first_seen, last_seen,
+                ),
+            )
+        conn.commit()
+
+    def get_account_claims(
+        self,
+        username: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Get paginated labeled claims for a specific account."""
+        conn = self._get_conn()
+        query = """
+            SELECT r.tweet_id, r.text, r.username, r.created_at,
+                   r.likes, r.retweets, r.replies, r.views, r.hashtags,
+                   r.ticker, r.company_name,
+                   r.price_at_tweet, r.price_24h_later, r.price_change_pct,
+                   r.news_headlines, r.has_catalyst, r.catalyst_type,
+                   r.posted_during_market_hours, r.volume_at_tweet,
+                   l.label, l.claimed_direction, l.actual_direction,
+                   l.exaggeration_score, l.news_summary, l.labeled_at
+            FROM labeled_claims l
+            JOIN raw_claims r ON r.tweet_id = l.tweet_id
+            WHERE r.username = %s
+            ORDER BY l.labeled_at DESC
+            LIMIT %s OFFSET %s
+        """
+        with conn.cursor() as cur:
+            cur.execute(query, (username, limit, offset))
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+
+        results = []
+        for row in rows:
+            d = dict(zip(columns, row))
+            if isinstance(d.get("news_headlines"), str):
+                d["news_headlines"] = json.loads(d["news_headlines"])
+            if isinstance(d.get("hashtags"), str):
+                d["hashtags"] = json.loads(d["hashtags"])
+            for key in ("created_at", "labeled_at"):
+                if isinstance(d.get(key), datetime):
+                    d[key] = d[key].isoformat()
+            results.append(d)
+        return results
+
+    def get_stock_feed(
+        self,
+        ticker: str,
+        limit: int = 50,
+        offset: int = 0,
+        exclude_bots: bool = True,
+    ) -> list[dict]:
+        """Get paginated labeled claims for a specific ticker."""
+        conn = self._get_conn()
+        query = """
+            SELECT r.tweet_id, r.text, r.username, r.created_at,
+                   r.likes, r.retweets, r.replies, r.views, r.hashtags,
+                   r.ticker, r.company_name,
+                   r.price_at_tweet, r.price_24h_later, r.price_change_pct,
+                   r.news_headlines, r.has_catalyst, r.catalyst_type,
+                   r.posted_during_market_hours, r.volume_at_tweet,
+                   l.label, l.claimed_direction, l.actual_direction,
+                   l.exaggeration_score, l.news_summary, l.labeled_at,
+                   a.grifter_score
+            FROM labeled_claims l
+            JOIN raw_claims r ON r.tweet_id = l.tweet_id
+            LEFT JOIN accounts a ON r.username = a.username
+            WHERE r.ticker = %s
+        """
+        params: list = [ticker]
+        if exclude_bots:
+            query += " AND (a.account_type IS NULL OR a.account_type = 'human')"
+        query += " ORDER BY l.labeled_at DESC LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
+
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+
+        results = []
+        for row in rows:
+            d = dict(zip(columns, row))
+            if isinstance(d.get("news_headlines"), str):
+                d["news_headlines"] = json.loads(d["news_headlines"])
+            if isinstance(d.get("hashtags"), str):
+                d["hashtags"] = json.loads(d["hashtags"])
+            for key in ("created_at", "labeled_at"):
+                if isinstance(d.get(key), datetime):
+                    d[key] = d[key].isoformat()
+            results.append(d)
+        return results
+
+    def get_stock_stats(self, ticker: str) -> dict:
+        """Get aggregate statistics for a specific ticker."""
+        conn = self._get_conn()
+        stats: dict = {"ticker": ticker}
+
+        with conn.cursor() as cur:
+            # Total claims and label distribution
+            cur.execute(
+                """
+                SELECT COUNT(*) as total,
+                       SUM(CASE WHEN l.label = 'exaggerated' THEN 1 ELSE 0 END) as exaggerated,
+                       SUM(CASE WHEN l.label = 'accurate' THEN 1 ELSE 0 END) as accurate,
+                       SUM(CASE WHEN l.label = 'understated' THEN 1 ELSE 0 END) as understated
+                FROM raw_claims r
+                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                WHERE r.ticker = %s
+                """,
+                (ticker,),
+            )
+            row = cur.fetchone()
+            total = row[0] or 0
+            exaggerated = row[1] or 0
+            accurate = row[2] or 0
+            understated = row[3] or 0
+            stats["total_claims"] = total
+            stats["label_distribution"] = {
+                "exaggerated": exaggerated,
+                "accurate": accurate,
+                "understated": understated,
+            }
+            stats["exaggeration_rate"] = exaggerated / total if total > 0 else 0.0
+
+            # Top catalysts
+            cur.execute(
+                """
+                SELECT r.catalyst_type, COUNT(*) as cnt
+                FROM raw_claims r
+                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                WHERE r.ticker = %s AND r.catalyst_type IS NOT NULL
+                GROUP BY r.catalyst_type
+                ORDER BY cnt DESC
+                """,
+                (ticker,),
+            )
+            stats["top_catalysts"] = [
+                {"catalyst_type": row[0], "count": row[1]}
+                for row in cur.fetchall()
+            ]
+
+            # Average price change
+            cur.execute(
+                """
+                SELECT AVG(r.price_change_pct)
+                FROM raw_claims r
+                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                WHERE r.ticker = %s AND r.price_change_pct IS NOT NULL
+                """,
+                (ticker,),
+            )
+            avg_row = cur.fetchone()
+            stats["avg_price_change"] = float(avg_row[0]) if avg_row[0] is not None else None
+
+            # Top accounts by claim count for this ticker
+            cur.execute(
+                """
+                SELECT r.username, COUNT(*) as cnt
+                FROM raw_claims r
+                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                WHERE r.ticker = %s
+                GROUP BY r.username
+                ORDER BY cnt DESC
+                LIMIT 10
+                """,
+                (ticker,),
+            )
+            stats["top_accounts"] = [
+                {"username": row[0], "count": row[1]}
+                for row in cur.fetchall()
+            ]
+
+        return stats
+
+    def get_leaderboard(
+        self,
+        category: str = "grifters",
+        limit: int = 20,
+    ) -> list[dict]:
+        """Get account leaderboard by category."""
+        if category == "signal":
+            order_dir = "ASC"
+        else:
+            order_dir = "DESC"
+
+        conn = self._get_conn()
+        query = f"""
+            SELECT username, grifter_score, total_claims,
+                   exaggerated_count, accurate_count
+            FROM accounts
+            WHERE grifter_score IS NOT NULL
+              AND total_claims >= 5
+              AND account_type = 'human'
+            ORDER BY grifter_score {order_dir}
+            LIMIT %s
+        """
+        with conn.cursor() as cur:
+            cur.execute(query, (limit,))
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+
+        return [dict(zip(columns, row)) for row in rows]
+
+    def get_unclassified_accounts(self, limit: int = 100) -> list[dict]:
+        """Get accounts that haven't been bot-classified yet, with sample tweets."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            # Find usernames with raw_claims but no classified accounts row
+            cur.execute(
+                """
+                SELECT DISTINCT r.username
+                FROM raw_claims r
+                LEFT JOIN accounts a ON r.username = a.username
+                WHERE a.username IS NULL OR a.classified_at IS NULL
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            usernames = [row[0] for row in cur.fetchall()]
+
+        if not usernames:
+            return []
+
+        results = []
+        with conn.cursor() as cur:
+            for username in usernames:
+                cur.execute(
+                    """
+                    SELECT text FROM raw_claims
+                    WHERE username = %s
+                    ORDER BY created_at DESC
+                    LIMIT 3
+                    """,
+                    (username,),
+                )
+                sample_tweets = [row[0] for row in cur.fetchall()]
+                results.append({
+                    "username": username,
+                    "sample_tweets": sample_tweets,
+                })
+
+        return results
+
+    def get_all_accounts_with_tweets(self, limit: int = 100) -> list[dict]:
+        """Get all accounts with sample tweets, regardless of classification status.
+
+        Used by the classify --reclassify command.
+        """
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT r.username, array_agg(r.text ORDER BY r.created_at DESC)
+                FROM raw_claims r
+                GROUP BY r.username
+                LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+        return [
+            {"username": row[0], "sample_tweets": row[1][:5]}
+            for row in rows
+        ]
