@@ -20,12 +20,14 @@ import json
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
 from ..data.db import SentinelDB
-from ..data.stocks import DEFENSE_STOCKS, TICKER_NAMES
+from ..data.models import RawClaim
+from ..data.stocks import DEFENSE_STOCKS, TICKER_NAMES, resolve_ticker
+from .app import limiter
 
 logger = logging.getLogger("sentinel.api.routes")
 
@@ -76,10 +78,11 @@ def _parse_tweet_id(url: str) -> int | None:
     return None
 
 
-def _fetch_tweet(tweet_id: int) -> tuple[str, str]:
-    """Fetch tweet text and username by ID using twscrape.
+def _fetch_tweet(tweet_id: int) -> dict:
+    """Fetch tweet data by ID using twscrape.
 
-    Returns (text, username).
+    Returns a dict with text, username, created_at, likes, retweets, replies,
+    views, and hashtags.
     Raises Exception if the tweet cannot be fetched.
     """
     from ..config import config as app_config
@@ -90,7 +93,16 @@ def _fetch_tweet(tweet_id: int) -> tuple[str, str]:
         tweet = await api.tweet_details(tweet_id)
         if tweet is None:
             raise ValueError(f"Tweet {tweet_id} not found")
-        return tweet.rawContent, tweet.user.username
+        return {
+            "text": tweet.rawContent,
+            "username": tweet.user.username,
+            "created_at": tweet.date if tweet.date else datetime.now(timezone.utc),
+            "likes": tweet.likeCount or 0,
+            "retweets": tweet.retweetCount or 0,
+            "replies": tweet.replyCount or 0,
+            "views": tweet.viewCount,
+            "hashtags": [ht.tag for ht in (tweet.hashtags or [])],
+        }
 
     return asyncio.run(_fetch())
 
@@ -374,6 +386,7 @@ def leaderboard():
 
 
 @api_bp.route("/predict", methods=["POST"])
+@limiter.limit("10/5minutes")
 def predict():
     """Predict a label for a tweet by URL.
 
@@ -390,12 +403,38 @@ def predict():
     if tweet_id is None:
         return jsonify({"error": "Invalid tweet URL. Expected: https://x.com/user/status/123456"}), 400
 
-    # Fetch tweet text via twscrape
+    # Fetch tweet data via twscrape
     try:
-        tweet_text, tweet_username = _fetch_tweet(tweet_id)
+        tweet_data = _fetch_tweet(tweet_id)
     except Exception as e:
         logger.error(f"Failed to fetch tweet {tweet_id}: {e}")
         return jsonify({"error": f"Could not fetch tweet: {e}"}), 502
+
+    tweet_text = tweet_data["text"]
+    tweet_username = tweet_data["username"]
+
+    # Store as raw claim if a defense ticker is mentioned
+    ticker = resolve_ticker(tweet_text)
+    if ticker:
+        try:
+            db = _get_db()
+            raw_claim = RawClaim(
+                tweet_id=tweet_id,
+                text=tweet_text,
+                username=tweet_username,
+                created_at=tweet_data["created_at"],
+                likes=tweet_data["likes"],
+                retweets=tweet_data["retweets"],
+                replies=tweet_data["replies"],
+                views=tweet_data["views"],
+                hashtags=tweet_data["hashtags"],
+                ticker=ticker,
+                company_name=TICKER_NAMES.get(ticker, ticker),
+            )
+            db.insert_raw_claim(raw_claim)
+            logger.info(f"Stored raw claim for tweet {tweet_id} ({ticker})")
+        except Exception as e:
+            logger.warning(f"Failed to store raw claim for tweet {tweet_id}: {e}")
 
     # Select model
     models = current_app.config.get("MODELS", {})

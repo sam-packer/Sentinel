@@ -9,8 +9,13 @@ import logging
 
 from flask import Flask
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 logger = logging.getLogger("sentinel.api")
+
+# Module-level limiter so routes can import and use as a decorator
+limiter = Limiter(get_remote_address)
 
 
 def create_app(database_url: str | None = None) -> Flask:
@@ -26,6 +31,9 @@ def create_app(database_url: str | None = None) -> Flask:
 
     # Enable CORS for all origins (SvelteKit dev server on different port)
     CORS(app)
+
+    # Initialize rate limiter with the app (in-memory storage)
+    limiter.init_app(app)
 
     # Store database URL in app config
     if database_url is None:

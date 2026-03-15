@@ -331,7 +331,14 @@ async def run_collection(
         status.tickers_total = len(ticker_list)
         _update_status(status, name)
 
-        # 1. Scrape
+        # 1. Connect DB early so scraped tweets are persisted incrementally
+        db = None
+        if database_url:
+            db = SentinelDB(database_url)
+            db.connect()
+            db.init_schema()
+
+        # 2. Scrape and persist each batch immediately
         scraper = DefenseStockScraper(config.twitter.db_path)
 
         def _on_ticker_done(ticker, total_claims, tickers_done, tickers_total):
@@ -340,6 +347,17 @@ async def run_collection(
             status.tickers_total = tickers_total
             status.scrape_tweets_found = total_claims
             _update_status(status, name)
+
+        def _persist_claims(batch):
+            """Insert a batch of claims to the DB so they survive crashes."""
+            if not db:
+                return
+            persisted = 0
+            for claim in batch:
+                db.insert_raw_claim(claim)
+                persisted += 1
+            if persisted:
+                logger.info(f"Persisted {persisted} raw claims to DB")
 
         if daily and since and until:
             # Split into per-day windows for even temporal distribution
@@ -365,10 +383,14 @@ async def run_collection(
                     until=day_end,
                 )
                 # Deduplicate across days
+                new_day_claims = []
                 for c in day_claims:
                     if c.tweet_id not in seen_ids:
                         seen_ids.add(c.tweet_id)
                         claims.append(c)
+                        new_day_claims.append(c)
+
+                _persist_claims(new_day_claims)
 
                 logger.info(
                     f"Day {day_count} ({day_start.strftime('%Y-%m-%d')}): "
@@ -383,6 +405,7 @@ async def run_collection(
                 since=since,
                 until=until,
             )
+            _persist_claims(claims)
 
         status.scraped = len(claims)
         status.scrape_tweets_found = len(claims)
@@ -392,29 +415,23 @@ async def run_collection(
         _update_status(status, name)
         logger.info(f"Scraped {len(claims)} raw claims")
 
-        # 2. Filter immature tweets
+        # 3. Filter immature tweets
         claims = _filter_mature_claims(claims)
 
-        # 3. Connect DB and skip already-stored tweets
-        db = None
-        if database_url:
-            db = SentinelDB(database_url)
-            db.connect()
-            db.init_schema()
-
+        # 4. Skip already-enriched tweets
         if db:
             all_ids = [c.tweet_id for c in claims]
             existing = db.get_existing_tweet_ids(all_ids)
             if existing:
                 claims = [c for c in claims if c.tweet_id not in existing]
                 logger.info(
-                    f"Skipped {len(existing)} already-scraped tweets, "
+                    f"Skipped {len(existing)} already-enriched tweets, "
                     f"{len(claims)} new tweets to enrich"
                 )
 
         status.scraped = len(claims)
 
-        # 4. Classify accounts and filter bots
+        # 5. Classify accounts and filter bots
         if db:
             bot_usernames = _classify_new_accounts(claims, db, status, name)
             if bot_usernames:
@@ -426,7 +443,7 @@ async def run_collection(
                 )
                 status.scraped = len(claims)
 
-        # 5. Enrich + label
+        # 6. Enrich + label
         await _enrich_and_label(claims, db, status, name, is_shutdown)
 
         if db:
