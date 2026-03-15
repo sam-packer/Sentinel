@@ -78,6 +78,7 @@ packages = ["src"]
 [tool.pylint.main]
 recursive = true
 source-roots = ["src", "tests"]
+ignored-modules = ["torch", "torch.utils.data", "transformers"]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
