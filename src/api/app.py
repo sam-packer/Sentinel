@@ -9,13 +9,10 @@ import logging
 
 from flask import Flask
 from flask_cors import CORS
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+
+from .limiter import limiter
 
 logger = logging.getLogger("sentinel.api")
-
-# Module-level limiter so routes can import and use as a decorator
-limiter = Limiter(get_remote_address)
 
 
 def create_app(database_url: str | None = None) -> Flask:

@@ -27,7 +27,7 @@ from flask import Blueprint, Response, current_app, jsonify, request, stream_wit
 from ..data.db import SentinelDB
 from ..data.models import RawClaim
 from ..data.stocks import DEFENSE_STOCKS, TICKER_NAMES, resolve_ticker
-from .app import limiter
+from .limiter import limiter
 
 logger = logging.getLogger("sentinel.api.routes")
 
