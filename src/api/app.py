@@ -44,6 +44,8 @@ def create_app(database_url: str | None = None) -> Flask:
             logger.info(f"Loaded model: {name}")
         except FileNotFoundError:
             logger.info(f"No trained model for '{name}', skipping")
+        except ImportError as e:
+            logger.warning(f"Cannot load '{name}': missing dependency ({e})")
     app.config["MODELS"] = loaded_models
 
     # Register API routes
