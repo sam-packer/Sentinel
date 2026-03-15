@@ -275,29 +275,3 @@ class PriceFetcher:
             pass  # volume is nice-to-have, don't fail the whole enrichment
 
         return PriceMove(price_at, price_after, round(change_pct, 4), volume)
-
-    def get_current_price(self, ticker: str) -> float | None:
-        """Get the latest available price for a ticker."""
-        if not self._validate_ticker(ticker):
-            return None
-
-        cache_key = f"current:{ticker}"
-        cached = self._cache_get(cache_key)
-        if cached is not None:
-            return cached
-
-        try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period="1d", interval="1m")
-            if hist.empty:
-                hist = t.history(period="5d", interval="1d")
-            if hist.empty:
-                return None
-
-            price = float(hist.iloc[-1]["Close"])
-            self._cache_set(cache_key, price)
-            return price
-
-        except Exception as e:
-            logger.error(f"Failed to fetch current price for {ticker}: {e}")
-            return None

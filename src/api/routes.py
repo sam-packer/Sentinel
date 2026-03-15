@@ -15,8 +15,10 @@ Endpoints:
   GET  /api/health               — Health check
 """
 
+import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime
 
@@ -34,8 +36,8 @@ def _serialize_account(account) -> dict:
     """Convert an Account dataclass to a JSON-safe dict."""
     return {
         "username": account.username,
-        "account_type": account.account_type,
-        "classification_reason": account.classification_reason,
+        "is_bot": account.account_type != "human",
+        "bot_reason": account.classification_reason,
         "total_claims": account.total_claims,
         "exaggerated_count": account.exaggerated_count,
         "accurate_count": account.accurate_count,
@@ -59,6 +61,38 @@ def _grifter_category(score) -> str:
     if score < 0.8:
         return "mostly_wrong"
     return "grifter"
+
+
+_TWEET_URL_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/(\w+)/status/(\d+)"
+)
+
+
+def _parse_tweet_id(url: str) -> int | None:
+    """Extract tweet ID from a Twitter/X URL."""
+    match = _TWEET_URL_RE.match(url)
+    if match:
+        return int(match.group(2))
+    return None
+
+
+def _fetch_tweet(tweet_id: int) -> tuple[str, str]:
+    """Fetch tweet text and username by ID using twscrape.
+
+    Returns (text, username).
+    Raises Exception if the tweet cannot be fetched.
+    """
+    from ..config import config as app_config
+    from twscrape import API
+
+    async def _fetch():
+        api = API(app_config.twitter.db_path)
+        tweet = await api.tweet_details(tweet_id)
+        if tweet is None:
+            raise ValueError(f"Tweet {tweet_id} not found")
+        return tweet.rawContent, tweet.user.username
+
+    return asyncio.run(_fetch())
 
 
 def _get_db() -> SentinelDB:
@@ -243,11 +277,9 @@ def account_detail(username):
 
     try:
         claims = db.get_account_claims(username, limit=200, offset=0)
-        return jsonify({
-            "account": _serialize_account(account),
-            "claims": claims,
-            "claim_count": len(claims),
-        })
+        account_data = _serialize_account(account)
+        account_data["claims"] = claims
+        return jsonify(account_data)
     except Exception as e:
         logger.error(f"Account claims query failed: {e}")
         return jsonify({"error": "Database error"}), 500
@@ -343,19 +375,29 @@ def leaderboard():
 
 @api_bp.route("/predict", methods=["POST"])
 def predict():
-    """Predict a label for tweet text using a trained ML model.
+    """Predict a label for a tweet by URL.
 
-    Body: { "text": str, "model": str?, "username": str? }
+    Body: { "url": str, "model": str? }
     Returns: { "label": str, "confidence": float, "model": str,
                "available_models": list, "account": dict | null }
-
-    Unlike /analyze, this runs pure text-based inference with no price
-    or news data. The whole point is predicting before the 24h window.
     """
     data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "text is required"}), 400
+    if not data or "url" not in data:
+        return jsonify({"error": "url is required"}), 400
 
+    # Parse tweet ID from URL
+    tweet_id = _parse_tweet_id(data["url"])
+    if tweet_id is None:
+        return jsonify({"error": "Invalid tweet URL. Expected: https://x.com/user/status/123456"}), 400
+
+    # Fetch tweet text via twscrape
+    try:
+        tweet_text, tweet_username = _fetch_tweet(tweet_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch tweet {tweet_id}: {e}")
+        return jsonify({"error": f"Could not fetch tweet: {e}"}), 502
+
+    # Select model
     models = current_app.config.get("MODELS", {})
     if not models:
         return jsonify({"error": "No trained models available. Run 'uv run train <model>' first."}), 503
@@ -371,24 +413,23 @@ def predict():
             }), 404
         model = models[model_name]
     else:
-        # Default to first available model
         model_name = available[0]
         model = models[model_name]
 
-    result = model.predict_proba(data["text"])
+    result = model.predict_proba(tweet_text)
 
-    # Look up account credibility if username provided
+    # Look up account credibility
     account_info = None
-    username = data.get("username")
-    if username:
+    if tweet_username:
         try:
             db = _get_db()
-            account = db.get_account(username)
+            account = db.get_account(tweet_username)
             if account:
                 account_info = {
                     "username": account.username,
                     "grifter_score": account.grifter_score,
                     "grifter_category": _grifter_category(account.grifter_score),
+                    "total_claims": account.total_claims,
                 }
         except Exception as e:
             logger.error(f"Account lookup in predict failed: {e}")

@@ -129,13 +129,6 @@ class SentinelDB:
             rows = cur.fetchall()
         return columns, rows
 
-    def claim_exists(self, tweet_id: int) -> bool:
-        """Check if a tweet has already been stored."""
-        conn = self._get_conn()
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM raw_claims WHERE tweet_id = %s", (tweet_id,))
-            return cur.fetchone() is not None
-
     def get_existing_tweet_ids(self, tweet_ids: list[int]) -> set[int]:
         """Return the subset of tweet_ids that already exist in raw_claims."""
         if not tweet_ids:
@@ -350,7 +343,7 @@ class SentinelDB:
         if label:
             query += " WHERE l.label = %s"
             params.append(label)
-        query += " ORDER BY l.labeled_at DESC LIMIT %s OFFSET %s"
+        query += " ORDER BY r.created_at DESC LIMIT %s OFFSET %s"
         params.extend([limit, offset])
 
         with conn.cursor() as cur:

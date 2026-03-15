@@ -125,6 +125,7 @@ class ClassicalModel(BaseModel):
             ngram_range=(1, 2),
             sublinear_tf=True,
             min_df=2,
+            stop_words="english",
         )
         X = self._tfidf.fit_transform(texts)
         y = np.array(labels)

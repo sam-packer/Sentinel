@@ -78,7 +78,6 @@ Tests use mocks for external dependencies (Twitter, yfinance, DuckDuckGo) and ru
 - `src/models/` — ML models (BaseModel interface, feature extraction, training)
   - `baseline.py` — Naive majority class predictor
   - `classical.py` — Optuna-tuned LR + XGBoost ensemble
-  - `features.py` — Tweet text → numerical feature extraction
   - `evaluate.py` — Metrics (accuracy, precision, recall, F1, confusion matrix)
   - `data.py` — Data loading and train/test splitting
 
