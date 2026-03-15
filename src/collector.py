@@ -147,6 +147,22 @@ def _setup_signals(status: CollectionStatus, name: str):
     return is_shutdown
 
 
+def _is_market_hours(dt: datetime) -> bool:
+    """Check if a datetime falls within US stock market hours (9:30 AM - 4:00 PM ET)."""
+    try:
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+    except ImportError:
+        et = timezone(timedelta(hours=-5))
+
+    et_dt = dt.astimezone(et)
+    if et_dt.weekday() >= 5:  # Saturday or Sunday
+        return False
+    market_open = et_dt.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = et_dt.replace(hour=16, minute=0, second=0, microsecond=0)
+    return market_open <= et_dt <= market_close
+
+
 def _filter_mature_claims(claims, logger_instance=logger):
     """Remove tweets less than 25h old (24h price window hasn't elapsed)."""
     now = datetime.now(tz=timezone.utc)
@@ -188,6 +204,8 @@ async def _enrich_and_label(claims, db, status, name, is_shutdown):
             claim.price_at_tweet = move.price_at
             claim.price_24h_later = move.price_after
             claim.price_change_pct = move.change_pct
+            claim.volume_at_tweet = move.volume_at_tweet
+            claim.posted_during_market_hours = _is_market_hours(claim.created_at)
 
             articles = await fetch_news_for_claim(
                 claim.ticker, claim.company_name, claim.created_at,
@@ -210,6 +228,69 @@ async def _enrich_and_label(claims, db, status, name, is_shutdown):
             status.failed += 1
             _update_status(status, name)
             logger.warning(f"Failed to process claim {claim.tweet_id}: {e}")
+
+
+def _classify_new_accounts(claims, db, status, name):
+    """Classify any unclassified accounts from the current batch.
+
+    Checks which usernames in the batch don't have a bot classification yet,
+    classifies them via LLM-as-judge, and saves the results. Returns the set
+    of bot usernames so the caller can filter them out.
+    """
+    from .bot_detector import classify_accounts_batch
+    from .config import config as app_config
+    from .data.models import Account
+
+    if not app_config.bot_detection.enabled:
+        logger.info("Bot detection disabled, skipping account classification")
+        return set()
+
+    # Find unique usernames that haven't been classified
+    usernames = {c.username for c in claims}
+    unclassified = []
+    bot_usernames = set()
+
+    for username in usernames:
+        account = db.get_account(username)
+        if account and account.classified_at is not None:
+            if account.account_type != "human":
+                bot_usernames.add(username)
+            continue
+        # Gather sample tweets for this account from the current batch
+        sample_tweets = [c.text for c in claims if c.username == username][:5]
+        unclassified.append({"username": username, "sample_tweets": sample_tweets})
+
+    if not unclassified:
+        logger.info(f"All {len(usernames)} accounts already classified, {len(bot_usernames)} known bots")
+        return bot_usernames
+
+    logger.info(f"Classifying {len(unclassified)} new accounts...")
+    status.phase = f"classifying {len(unclassified)} accounts"
+    _update_status(status, name)
+
+    results = classify_accounts_batch(unclassified, model=app_config.bot_detection.model)
+
+    newly_classified = 0
+    for username, classification in results:
+        account = db.get_account(username) or Account(username=username)
+        account.account_type = classification.account_type
+        account.classification_reason = f"{classification.account_type}: {classification.reason}"
+        account.classified_at = datetime.now(timezone.utc)
+        db.upsert_account(account)
+
+        if classification.is_filtered:
+            bot_usernames.add(username)
+        newly_classified += 1
+        logger.info(
+            f"  @{username}: {classification.account_type.upper()} "
+            f"({classification.confidence:.0%}) — {classification.reason}"
+        )
+
+    logger.info(
+        f"Account classification done: {newly_classified} classified, "
+        f"{len(bot_usernames)} total bots"
+    )
+    return bot_usernames
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +414,19 @@ async def run_collection(
 
         status.scraped = len(claims)
 
-        # 4. Enrich + label
+        # 4. Classify accounts and filter bots
+        if db:
+            bot_usernames = _classify_new_accounts(claims, db, status, name)
+            if bot_usernames:
+                pre_filter = len(claims)
+                claims = [c for c in claims if c.username not in bot_usernames]
+                logger.info(
+                    f"Filtered {pre_filter - len(claims)} bot tweets, "
+                    f"{len(claims)} human tweets to enrich"
+                )
+                status.scraped = len(claims)
+
+        # 5. Enrich + label
         await _enrich_and_label(claims, db, status, name, is_shutdown)
 
         if db:
@@ -412,6 +505,17 @@ async def run_enrichment(
             return
 
         claims = _filter_mature_claims(claims)
+
+        # Classify accounts and filter bots
+        bot_usernames = _classify_new_accounts(claims, db, status, name)
+        if bot_usernames:
+            pre_filter = len(claims)
+            claims = [c for c in claims if c.username not in bot_usernames]
+            logger.info(
+                f"Filtered {pre_filter - len(claims)} bot tweets, "
+                f"{len(claims)} human tweets to enrich"
+            )
+
         status.scraped = len(claims)
         _update_status(status, name)
         logger.info(f"Enriching {len(claims)} claims")

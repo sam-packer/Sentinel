@@ -66,6 +66,9 @@ class ScrapedTweet:
             created_at=self.created_at,
             likes=self.likes,
             retweets=self.retweets,
+            replies=self.replies,
+            views=self.views,
+            hashtags=self.hashtags,
             ticker=ticker,
             company_name=company_name,
         )

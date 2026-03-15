@@ -11,9 +11,11 @@ This is a **retrospective data collection pipeline**, not a real-time prediction
 ## Pipeline
 
 1. **Scrape**: Searches Twitter for defense ticker cashtags (`$LMT`) and quoted company names (`"Lockheed Martin"`) via twscrape. Supports `--since`/`--until` for time-windowed historical scraping.
-2. **Enrich**: Fetches price at tweet time + 24h later (yfinance) and news headlines around the tweet (yfinance + DuckDuckGo, ±48h window). Classifies news into catalyst types (contract > earnings > geopolitical > budget) by keyword matching.
-3. **Label**: Rule-based labeling — compares claimed direction (keyword/emoji matching) against actual 24h price direction. No NLP models involved, just string matching and hardcoded thresholds.
-4. **API**: Flask serves `/api/feed`, `/api/analyze`, `/api/stats`, `/api/feed/stream` (SSE).
+2. **Classify**: LLM-as-judge (Claude) classifies each Twitter account as human or bot. Per-account classification cached in the `accounts` table. Bot tweets are filtered out before enrichment.
+3. **Enrich**: Fetches price at tweet time + 24h later (yfinance) and news headlines around the tweet (yfinance + DuckDuckGo, ±48h window). Classifies news into catalyst types (contract > earnings > geopolitical > budget) by keyword matching.
+4. **Label**: Rule-based labeling — compares claimed direction (keyword/emoji matching) against actual 24h price direction. No NLP models involved, just string matching and hardcoded thresholds.
+5. **Score**: Grifter score tracks each account's credibility (exaggerated_count / total_claims). Updated incrementally on each new label.
+6. **API**: Flask serves feed, prediction, account credibility, per-stock feeds, and leaderboard endpoints.
 
 ## Quick Start
 
@@ -36,7 +38,17 @@ uv run collect --stop          # Stop background collection
 uv run enrich                  # Re-enrich existing claims
 uv run enrich --days 7         # Re-enrich claims from last 7 days
 uv run enrich --status         # Check background enrichment progress
+uv run classify                # Classify unclassified accounts as human/bot
+uv run classify --limit 50     # Classify up to 50 accounts
+uv run classify --reclassify   # Re-classify all accounts
 uv run serve                   # Start Flask API
+uv run train baseline          # Train naive baseline (majority class)
+uv run train classical         # Train classical model (Optuna-tuned TF-IDF + LR, 200 trials)
+uv run train neural            # Train neural model (fine-tuned BERTweet, 50 trials, requires GPU)
+uv run evaluate baseline       # Evaluate baseline on test set
+uv run evaluate classical      # Evaluate classical model on test set
+uv run evaluate neural         # Evaluate neural model on test set
+uv run predict classical "tweet text"  # Predict label for a tweet
 ```
 
 ## Testing
@@ -57,21 +69,29 @@ Tests use mocks for external dependencies (Twitter, yfinance, DuckDuckGo) and ru
 - `src/price_fetcher.py` — yfinance price lookups with caching
 - `src/news_fetcher.py` — News fetching + catalyst classification
 - `src/data/labeler.py` — Rule-based claim labeling (keyword matching + thresholds)
-- `src/data/models.py` — RawClaim + LabeledClaim dataclasses
+- `src/bot_detector.py` — LLM-as-judge bot detection (Claude API)
+- `src/data/models.py` — RawClaim, LabeledClaim, Account dataclasses
 - `src/data/stocks.py` — Defense stock universe (ticker mapping + resolution)
 - `src/data/db.py` — PostgreSQL persistence
 - `src/api/` — Flask API (app factory + routes)
 - `src/config.py` — YAML + env configuration
+- `src/models/` — ML models (BaseModel interface, feature extraction, training)
+  - `baseline.py` — Naive majority class predictor
+  - `classical.py` — Optuna-tuned LR + XGBoost ensemble
+  - `evaluate.py` — Metrics (accuracy, precision, recall, F1, confusion matrix)
+  - `data.py` — Data loading and train/test splitting
 
 ## Documentation
 
 - `docs/setup.md` — Full installation, PostgreSQL setup, Twitter accounts, deployment
 - `docs/api.md` — API endpoint reference with examples
+- `docs/decisions/` — Decision log documenting design choices and rationale
+- `docs/project_framing.md` — High-level project framing for the course report
 
 ## Configuration
 
 - **`config.yaml`**: App settings (labeling thresholds, scraping options)
-- **`.env`**: Secrets (`DATABASE_URL`)
+- **`.env`**: Secrets (`DATABASE_URL`, `ANTHROPIC_API_KEY`)
 
 ## Package Manager
 

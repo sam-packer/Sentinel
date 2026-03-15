@@ -1,7 +1,8 @@
 # Sentinel
 
-Defense Stock Claim Analyzer. Scrapes tweets about defense stocks, fetches the actual price movement and surrounding
-news, then labels each claim as **exaggerated**, **accurate**, or **understated**.
+Defense Stock Claim Analyzer. Scrapes tweets about defense stocks, filters out bots, fetches the actual price movement
+and surrounding news, then labels each claim as **exaggerated**, **accurate**, or **understated**. Tracks account-level
+credibility to surface who's consistently right and who's full of it.
 
 Covers 15 public defense companies (LMT, RTX, NOC, GD, BA, LHX, HII, LDOS, SAIC, BAH, KTOS, PLTR, RKLB) and recognizes
 two private ones (Anduril, Shield AI) in tweet text.
@@ -11,7 +12,7 @@ two private ones (Anduril, Shield AI) in tweet text.
 ```bash
 uv sync
 cp config.example.yaml config.yaml
-cp .env.example .env        # set DATABASE_URL
+cp .env.example .env        # set DATABASE_URL and ANTHROPIC_API_KEY
 uv run setup
 uv run collect --days 7
 uv run serve
@@ -26,7 +27,7 @@ Sentinel is a four-stage retrospective pipeline. "Retrospective" because labelin
 have elapsed, so tweets less than 25 hours old are skipped during enrichment.
 
 ```
-Twitter/X ──► Scrape ──► Enrich (price + news) ──► Label ──► PostgreSQL ──► Flask API
+Twitter/X ──► Scrape ──► Classify accounts ──► Enrich (price + news) ──► Label ──► PostgreSQL ──► Flask API
 ```
 
 ### Stage 1: Scrape
@@ -41,7 +42,24 @@ multiple defense stocks, the scraper picks the most specific match (longest comp
 The `--days` flag scrapes each day independently rather than requesting a single wide time window. This prevents
 Twitter from biasing results toward popular/recent tweets and gives more even temporal distribution.
 
-### Stage 2: Enrich with price data
+### Stage 2: Classify accounts
+
+Before enriching tweets, Sentinel classifies each account as human or bot using LLM-as-judge (Claude). This runs
+automatically during collection — each account is classified once and the result is cached in the `accounts` table.
+
+The classifier receives the account's username and up to 5 sample tweets, then categorizes it as one of:
+- **human** — real person sharing opinions or analysis
+- **news_ticker** — automated account reposting headlines verbatim
+- **repost_bot** — account that copies or auto-generates content
+- **spam_bot** — spam, scam, or irrelevant promotional content
+
+Bot accounts are filtered out before enrichment. This saves API calls (no point enriching bot tweets with price/news
+data) and ensures the ML models train only on human opinions.
+
+Requires `ANTHROPIC_API_KEY` in `.env`. If not set or if bot detection is disabled in config, this step is skipped and
+all accounts are treated as human.
+
+### Stage 3: Enrich with price data
 
 For each tweet, fetches two prices via yfinance:
 
@@ -55,7 +73,7 @@ reader would have experienced.
 Both prices try 5-minute candles first (most granular), fall back to hourly, then daily. The 30-minute averaging window
 smooths out intraday noise.
 
-### Stage 3: Enrich with news
+### Stage 4: Enrich with news
 
 Fetches news articles from yfinance ticker news and DuckDuckGo news search within a ±48-hour window around the tweet.
 Articles are deduplicated by URL.
@@ -76,7 +94,7 @@ Four catalyst types are checked in priority order (first match wins):
 The priority ordering matters: a headline mentioning both a "Pentagon contract" and "budget" is classified as
 `contract`, because contract wins are more directly price-moving than general budget news.
 
-### Stage 4: Label
+### Stage 5: Label
 
 Compares what the tweet *claimed* against what *actually happened*. This is entirely rule-based, no ML models, just
 string matching and hardcoded thresholds.
@@ -172,6 +190,18 @@ Labeling fields:
 | `exaggeration_score` | 0.0 (accurate) to 1.0 (completely wrong). More granular than the three-bucket label. |
 | `news_summary`       | First headline from `news_headlines`, used for display.                              |
 
+Account fields (stored in `accounts` table):
+
+| Field              | Description                                                                |
+|--------------------|----------------------------------------------------------------------------|
+| `username`         | Twitter handle. Primary key.                                               |
+| `is_bot`           | Whether the account is a bot (classified by LLM-as-judge).                 |
+| `bot_reason`       | Why the account was classified as bot/human. Includes type and explanation. |
+| `total_claims`     | Total labeled claims from this account.                                    |
+| `exaggerated_count`| How many claims were labeled exaggerated.                                  |
+| `accurate_count`   | How many claims were labeled accurate.                                     |
+| `grifter_score`    | Ratio of exaggerated to total claims. Null if fewer than 5 claims.         |
+
 ## Commands
 
 ### setup
@@ -214,6 +244,17 @@ uv run enrich --status             # check background progress
 uv run enrich --stop               # stop background enrichment
 ```
 
+### classify
+
+Manually classify Twitter accounts as human or bot. This is a catch-up tool — accounts are automatically classified
+during collection, but this command handles accounts that were scraped before bot detection was added.
+
+```bash
+uv run classify                        # classify unclassified accounts (up to 100)
+uv run classify --limit 500            # classify more accounts
+uv run classify --reclassify           # re-classify all accounts
+```
+
 ### serve
 
 Starts the Flask API server. Uses gunicorn with 4 workers by default.
@@ -229,20 +270,43 @@ uv run serve --dev                 # Flask dev server with hot reload
 Trains a model on labeled claims from the database. Loads data, splits into train/test sets with a fixed seed, trains,
 saves the model to `models/<name>/`, and prints test set metrics.
 
+Available models:
+- `baseline` — Naive majority class predictor. Always predicts the most common label (~78% accuracy, 0% exaggeration recall). The floor any real model must beat.
+- `classical` — Optuna-tuned TF-IDF + logistic regression. 200 Optuna trials with stratified 3-fold CV optimizing macro F1. Saves model weights, TF-IDF vectorizer, and top predictive words for interpretability.
+- `neural` — Fine-tuned BERTweet (vinai/bertweet-base). 50 Optuna trials with stratified 3-fold CV optimizing macro F1. Tunes learning rate, weight decay, warmup, epochs, batch size, and dropout. Requires GPU.
+
 ```bash
 uv run train baseline              # train the majority-class baseline
-uv run train baseline --seed 99    # different random split
-uv run train baseline --test-size 0.3  # 30% test set instead of 20%
+uv run train classical             # train classical model (LR + XGBoost, ~200 Optuna trials each)
+uv run train classical --seed 99   # different random split
+uv run train classical --test-size 0.3  # 30% test set instead of 20%
+```
+
+Model artifacts are saved to `models/<name>/`:
+
+```
+models/
+├── baseline/
+│   └── model.json              # majority class + class counts
+├── classical/
+│   ├── lr.pkl                  # logistic regression weights
+│   ├── tfidf.pkl               # TF-IDF vectorizer (vocabulary + weights)
+│   └── model.json              # hyperparams, top predictive words
+└── neural/
+    ├── model/                  # BERTweet fine-tuned weights (safetensors)
+    ├── tokenizer/              # BERTweet tokenizer files
+    └── model.json              # hyperparams, training metadata
 ```
 
 ### evaluate
 
 Evaluates a previously trained model on the test set. Uses the same seed and split as training so the test data
-matches.
+matches. Reports accuracy, per-class precision/recall/F1, and confusion matrix.
 
 ```bash
 uv run evaluate baseline           # evaluate saved baseline model
-uv run evaluate baseline --seed 99 # must match the seed used during training
+uv run evaluate classical          # evaluate classical ensemble
+uv run evaluate classical --seed 99 # must match the seed used during training
 ```
 
 ### predict

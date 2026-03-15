@@ -2,16 +2,23 @@
 API route handlers for Sentinel.
 
 Endpoints:
-  POST /api/predict     — ML model inference on tweet text
-  GET  /api/feed        — Paginated labeled claims (newest first)
-  GET  /api/feed/stream — SSE stream of new claims
-  GET  /api/stats       — Aggregate statistics
-  GET  /api/stocks      — Defense stock universe
-  GET  /api/health      — Health check
+  POST /api/predict              — ML model inference on tweet text
+  GET  /api/feed                 — Paginated labeled claims (newest first)
+  GET  /api/feed/stream          — SSE stream of new claims
+  GET  /api/stats                — Aggregate statistics
+  GET  /api/stocks               — Defense stock universe
+  GET  /api/stocks/<ticker>/feed — Per-stock claim feed
+  GET  /api/stocks/<ticker>/stats — Per-stock aggregates
+  GET  /api/accounts             — Account listing with credibility scores
+  GET  /api/accounts/<username>  — Account detail + claim history
+  GET  /api/leaderboard          — Top grifters / best signal accounts
+  GET  /api/health               — Health check
 """
 
+import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime
 
@@ -25,13 +32,76 @@ logger = logging.getLogger("sentinel.api.routes")
 api_bp = Blueprint("api", __name__)
 
 
+def _serialize_account(account) -> dict:
+    """Convert an Account dataclass to a JSON-safe dict."""
+    return {
+        "username": account.username,
+        "is_bot": account.account_type != "human",
+        "bot_reason": account.classification_reason,
+        "total_claims": account.total_claims,
+        "exaggerated_count": account.exaggerated_count,
+        "accurate_count": account.accurate_count,
+        "understated_count": account.understated_count,
+        "grifter_score": account.grifter_score,
+        "grifter_category": _grifter_category(account.grifter_score),
+        "first_seen": account.first_seen.isoformat() if account.first_seen else None,
+        "last_seen": account.last_seen.isoformat() if account.last_seen else None,
+        "classified_at": account.classified_at.isoformat() if account.classified_at else None,
+    }
+
+
+def _grifter_category(score) -> str:
+    """Map a grifter score to a human-readable category."""
+    if score is None:
+        return "unrated"
+    if score < 0.2:
+        return "high_signal"
+    if score < 0.5:
+        return "normal"
+    if score < 0.8:
+        return "mostly_wrong"
+    return "grifter"
+
+
+_TWEET_URL_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/(\w+)/status/(\d+)"
+)
+
+
+def _parse_tweet_id(url: str) -> int | None:
+    """Extract tweet ID from a Twitter/X URL."""
+    match = _TWEET_URL_RE.match(url)
+    if match:
+        return int(match.group(2))
+    return None
+
+
+def _fetch_tweet(tweet_id: int) -> tuple[str, str]:
+    """Fetch tweet text and username by ID using twscrape.
+
+    Returns (text, username).
+    Raises Exception if the tweet cannot be fetched.
+    """
+    from ..config import config as app_config
+    from twscrape import API
+
+    async def _fetch():
+        api = API(app_config.twitter.db_path)
+        tweet = await api.tweet_details(tweet_id)
+        if tweet is None:
+            raise ValueError(f"Tweet {tweet_id} not found")
+        return tweet.rawContent, tweet.user.username
+
+    return asyncio.run(_fetch())
+
+
 def _get_db() -> SentinelDB:
     """Get database instance, creating if needed."""
-    if not hasattr(current_app, "_sentinel_db"):
+    if "sentinel_db" not in current_app.extensions:
         db = SentinelDB(current_app.config["DATABASE_URL"])
         db.connect()
-        current_app._sentinel_db = db  # pylint: disable=protected-access
-    return current_app._sentinel_db  # pylint: disable=protected-access
+        current_app.extensions["sentinel_db"] = db
+    return current_app.extensions["sentinel_db"]
 
 
 @api_bp.route("/health", methods=["GET"])
@@ -142,20 +212,192 @@ def stats():
         return jsonify({"error": "Database error"}), 500
 
 
+@api_bp.route("/accounts", methods=["GET"])
+def accounts():
+    """List accounts with credibility scores.
+
+    Query params:
+      sort_by    — field to sort by (default "grifter_score")
+      order      — "asc" or "desc" (default "desc")
+      min_claims — minimum claims to include (default 5)
+      account_type — optional filter: human, bot, garbage
+      limit      — max results (default 50)
+      offset     — pagination offset (default 0)
+    """
+    try:
+        sort_by = request.args.get("sort_by", "grifter_score")
+        order = request.args.get("order", "desc")
+        min_claims = int(request.args.get("min_claims", 5))
+        limit = min(int(request.args.get("limit", 50)), 200)
+        offset = int(request.args.get("offset", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid query parameters"}), 400
+
+    if order not in ("asc", "desc"):
+        return jsonify({"error": "Invalid order, must be 'asc' or 'desc'"}), 400
+
+    account_type = request.args.get("account_type")
+    if account_type and account_type not in ("human", "bot", "garbage"):
+        return jsonify({"error": "Invalid account_type filter. Must be: human, bot, garbage"}), 400
+
+    try:
+        db = _get_db()
+        account_list = db.get_accounts(
+            sort_by=sort_by,
+            order=order,
+            min_claims=min_claims,
+            account_type=account_type,
+            limit=limit,
+            offset=offset,
+        )
+        return jsonify({
+            "accounts": [_serialize_account(a) for a in account_list],
+            "count": len(account_list),
+        })
+    except Exception as e:
+        logger.error(f"Accounts query failed: {e}")
+        return jsonify({"error": "Database error"}), 500
+
+
+@api_bp.route("/accounts/<username>", methods=["GET"])
+def account_detail(username):
+    """Account detail with claim history.
+
+    Returns account info plus their labeled claims.
+    """
+    try:
+        db = _get_db()
+        account = db.get_account(username)
+    except Exception as e:
+        logger.error(f"Account lookup failed: {e}")
+        return jsonify({"error": "Database error"}), 500
+
+    if account is None:
+        return jsonify({"error": f"Account '{username}' not found"}), 404
+
+    try:
+        claims = db.get_account_claims(username, limit=200, offset=0)
+        account_data = _serialize_account(account)
+        account_data["claims"] = claims
+        return jsonify(account_data)
+    except Exception as e:
+        logger.error(f"Account claims query failed: {e}")
+        return jsonify({"error": "Database error"}), 500
+
+
+@api_bp.route("/stocks/<ticker>/feed", methods=["GET"])
+def stock_feed(ticker):
+    """Per-stock claim feed.
+
+    Query params:
+      limit        — max results (default 50)
+      offset       — pagination offset (default 0)
+      exclude_bots — exclude bot accounts (default true)
+    """
+    ticker = ticker.upper()
+    if ticker not in TICKER_NAMES:
+        return jsonify({"error": f"Unknown ticker '{ticker}'"}), 404
+
+    try:
+        limit = min(int(request.args.get("limit", 50)), 200)
+        offset = int(request.args.get("offset", 0))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid query parameters"}), 400
+
+    exclude_bots = request.args.get("exclude_bots", "true").lower() in ("true", "1", "yes")
+
+    try:
+        db = _get_db()
+        claims = db.get_stock_feed(
+            ticker=ticker,
+            limit=limit,
+            offset=offset,
+            exclude_bots=exclude_bots,
+        )
+        return jsonify({
+            "claims": claims,
+            "count": len(claims),
+            "ticker": ticker,
+        })
+    except Exception as e:
+        logger.error(f"Stock feed query failed: {e}")
+        return jsonify({"error": "Database error"}), 500
+
+
+@api_bp.route("/stocks/<ticker>/stats", methods=["GET"])
+def stock_stats(ticker):
+    """Per-stock aggregate statistics."""
+    ticker = ticker.upper()
+    if ticker not in TICKER_NAMES:
+        return jsonify({"error": f"Unknown ticker '{ticker}'"}), 404
+
+    try:
+        db = _get_db()
+        stock_data = db.get_stock_stats(ticker)
+        return jsonify({
+            "ticker": ticker,
+            "company_name": TICKER_NAMES[ticker],
+            **stock_data,
+        })
+    except Exception as e:
+        logger.error(f"Stock stats query failed: {e}")
+        return jsonify({"error": "Database error"}), 500
+
+
+@api_bp.route("/leaderboard", methods=["GET"])
+def leaderboard():
+    """Account leaderboard by category.
+
+    Query params:
+      category — "grifters" or "signal" (default "grifters")
+      limit    — max results (default 20)
+    """
+    category = request.args.get("category", "grifters")
+    if category not in ("grifters", "signal"):
+        return jsonify({"error": "Invalid category, must be 'grifters' or 'signal'"}), 400
+
+    try:
+        limit = min(int(request.args.get("limit", 20)), 100)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid query parameters"}), 400
+
+    try:
+        db = _get_db()
+        account_list = db.get_leaderboard(category=category, limit=limit)
+        return jsonify({
+            "category": category,
+            "accounts": account_list,
+        })
+    except Exception as e:
+        logger.error(f"Leaderboard query failed: {e}")
+        return jsonify({"error": "Database error"}), 500
+
+
 @api_bp.route("/predict", methods=["POST"])
 def predict():
-    """Predict a label for tweet text using a trained ML model.
+    """Predict a label for a tweet by URL.
 
-    Body: { "text": str, "model": str? }
-    Returns: { "label": str, "model": str, "available_models": list }
-
-    Unlike /analyze, this runs pure text-based inference with no price
-    or news data. The whole point is predicting before the 24h window.
+    Body: { "url": str, "model": str? }
+    Returns: { "label": str, "confidence": float, "model": str,
+               "available_models": list, "account": dict | null }
     """
     data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "text is required"}), 400
+    if not data or "url" not in data:
+        return jsonify({"error": "url is required"}), 400
 
+    # Parse tweet ID from URL
+    tweet_id = _parse_tweet_id(data["url"])
+    if tweet_id is None:
+        return jsonify({"error": "Invalid tweet URL. Expected: https://x.com/user/status/123456"}), 400
+
+    # Fetch tweet text via twscrape
+    try:
+        tweet_text, tweet_username = _fetch_tweet(tweet_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch tweet {tweet_id}: {e}")
+        return jsonify({"error": f"Could not fetch tweet: {e}"}), 502
+
+    # Select model
     models = current_app.config.get("MODELS", {})
     if not models:
         return jsonify({"error": "No trained models available. Run 'uv run train <model>' first."}), 503
@@ -171,14 +413,31 @@ def predict():
             }), 404
         model = models[model_name]
     else:
-        # Default to first available model
         model_name = available[0]
         model = models[model_name]
 
-    label = model.predict(data["text"])
+    result = model.predict_proba(tweet_text)
+
+    # Look up account credibility
+    account_info = None
+    if tweet_username:
+        try:
+            db = _get_db()
+            account = db.get_account(tweet_username)
+            if account:
+                account_info = {
+                    "username": account.username,
+                    "grifter_score": account.grifter_score,
+                    "grifter_category": _grifter_category(account.grifter_score),
+                    "total_claims": account.total_claims,
+                }
+        except Exception as e:
+            logger.error(f"Account lookup in predict failed: {e}")
 
     return jsonify({
-        "label": label,
+        "label": result["label"],
+        "confidence": result["confidence"],
         "model": model_name,
         "available_models": available,
+        "account": account_info,
     })
