@@ -112,7 +112,12 @@ class ClassicalModel(BaseModel):
         return "classical"
 
     def train(
-        self, texts: list[str], labels: list[str], *, n_trials: int = 200
+        self,
+        texts: list[str],
+        labels: list[str],
+        *,
+        n_trials: int = 200,
+        saved_params: dict | None = None,
     ) -> dict:
         # TF-IDF vectorization — learns vocabulary from training data
         self._tfidf = TfidfVectorizer(
@@ -126,9 +131,13 @@ class ClassicalModel(BaseModel):
 
         logger.info(f"TF-IDF vocabulary size: {len(self._tfidf.vocabulary_)}")
 
-        # Tune hyperparameters
-        logger.info(f"Tuning LR ({n_trials} trials, {N_SPLITS}-fold CV, macro F1)...")
-        lr_tuning = _tune_lr(X, y, n_trials)
+        # Tune or reuse hyperparameters
+        if saved_params is not None:
+            lr_tuning = saved_params
+            logger.info(f"Using saved params: {lr_tuning['best_params']}")
+        else:
+            logger.info(f"Tuning LR ({n_trials} trials, {N_SPLITS}-fold CV, macro F1)...")
+            lr_tuning = _tune_lr(X, y, n_trials)
 
         # Train final model on full training set with best params
         self._lr = LogisticRegression(
@@ -208,6 +217,11 @@ class ClassicalModel(BaseModel):
             pickle.dump(self._lr, f)
         with open(directory / "tfidf.pkl", "wb") as f:
             pickle.dump(self._tfidf, f)
+
+        # Save best hyperparameters separately for --skip-tuning
+        if "tuning" in self._training_meta:
+            with open(directory / "best_params.json", "w") as f:
+                json.dump(self._training_meta["tuning"], f, indent=2)
 
         meta = {
             "classes": self._lr.classes_.tolist(),

@@ -506,7 +506,8 @@ def _get_model(name: str):
 @click.argument("model_name")
 @click.option("--test-size", default=0.2, type=float, help="Fraction held out for testing (default: 0.2)")
 @click.option("--seed", default=42, type=int, help="Random seed for train/test split")
-def train(model_name: str, test_size: float, seed: int):
+@click.option("--tune", is_flag=True, help="Run Optuna hyperparameter tuning (default: reuse saved params)")
+def train(model_name: str, test_size: float, seed: int, tune: bool):
     """Train a model. Usage: uv run train baseline"""
     _init()
 
@@ -534,9 +535,24 @@ def train(model_name: str, test_size: float, seed: int):
     split = prepare_split(claims, test_size=test_size, seed=seed)
     click.echo(f"Data: {split.train_size} train, {split.test_size} test")
 
+    # Load saved hyperparameters unless --tune is passed
+    saved_params = None
+    if not tune:
+        import json
+        params_path = MODEL_DIR / model.name / "best_params.json"
+        if params_path.exists():
+            with open(params_path) as f:
+                saved_params = json.load(f)
+            click.echo(f"Using saved hyperparameters (pass --tune to retune)")
+        else:
+            click.echo("No saved params found, running Optuna tuning...")
+
     # Train
     click.echo(f"Training {model.name}...")
-    metadata = model.train(split.train_texts, split.train_labels)
+    if saved_params is not None:
+        metadata = model.train(split.train_texts, split.train_labels, saved_params=saved_params)
+    else:
+        metadata = model.train(split.train_texts, split.train_labels)
     for key, value in metadata.items():
         click.echo(f"  {key}: {value}")
 

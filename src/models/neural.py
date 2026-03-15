@@ -165,6 +165,8 @@ def _train_one_fold(
 
     for epoch in range(params["num_epochs"]):
         model.train()
+        epoch_loss = 0.0
+        n_batches = 0
         for batch in train_loader:
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
@@ -172,6 +174,8 @@ def _train_one_fold(
 
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
             loss = criterion(outputs.logits, labels)
+            epoch_loss += loss.item()
+            n_batches += 1
 
             optimizer.zero_grad()
             loss.backward()
@@ -194,6 +198,7 @@ def _train_one_fold(
                 all_labels.extend(batch["labels"].numpy())
 
         val_f1 = f1_score(all_labels, all_preds, average="macro")
+        avg_loss = epoch_loss / max(n_batches, 1)
 
         if val_f1 > best_f1:
             best_f1 = val_f1
@@ -292,7 +297,12 @@ class NeuralModel(BaseModel):
         return "neural"
 
     def train(
-        self, texts: list[str], labels: list[str], *, n_trials: int = 50
+        self,
+        texts: list[str],
+        labels: list[str],
+        *,
+        n_trials: int = 50,
+        saved_params: dict | None = None,
     ) -> dict:
         self._device = _get_device()
         logger.info(f"Device: {self._device}")
@@ -304,20 +314,43 @@ class NeuralModel(BaseModel):
         logger.info(f"Downloading {MODEL_NAME} (if not cached)...")
         self._tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         # Pre-download model weights so folds can use local_files_only=True
-        AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
-        logger.info("Model cached. Starting tuning...")
+        _pre = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
+        # Diagnostic: verify pretrained weights loaded
+        _emb = _pre.roberta.embeddings.word_embeddings.weight[0, :5].tolist()
+        logger.info(f"Pretrained embedding sample: {_emb}")
+        del _pre
+        torch.cuda.empty_cache()
+        logger.info("Model cached.")
 
-        # Tune hyperparameters
-        logger.info(
-            f"Tuning BERTweet ({n_trials} trials, {N_SPLITS}-fold CV, macro F1)..."
-        )
-        tuning = _tune_neural(texts, y, n_trials, self._device, self._tokenizer)
+        # Tune or reuse hyperparameters
+        if saved_params is not None:
+            tuning = saved_params
+            logger.info(f"Using saved params: {tuning['best_params']}")
+        else:
+            logger.info(
+                f"Tuning BERTweet ({n_trials} trials, {N_SPLITS}-fold CV, macro F1)..."
+            )
+            tuning = _tune_neural(texts, y, n_trials, self._device, self._tokenizer)
 
-        # Train final model on full training set with best params
+        # Train final model on full training set with best params.
+        # Hold out 10% for monitoring — NOT for model selection, just to
+        # verify the model is learning and apply early stopping.
         logger.info("Training final model with best params on full training set...")
         best_params = tuning["best_params"]
 
-        _seed_everything()
+        torch.manual_seed(SEED)
+        torch.cuda.manual_seed_all(SEED)
+
+        # 90/10 split for train/monitor
+        n_monitor = max(int(len(texts) * 0.1), 1)
+        indices = np.random.RandomState(SEED).permutation(len(texts))
+        monitor_idx = indices[:n_monitor]
+        train_idx = indices[n_monitor:]
+
+        train_texts_final = [texts[i] for i in train_idx]
+        train_labels_final = [y[i] for i in train_idx]
+        monitor_texts = [texts[i] for i in monitor_idx]
+        monitor_labels = [y[i] for i in monitor_idx]
 
         config = AutoConfig.from_pretrained(
             MODEL_NAME,
@@ -326,19 +359,28 @@ class NeuralModel(BaseModel):
             label2id=LABEL2ID,
             hidden_dropout_prob=best_params["dropout"],
             classifier_dropout=best_params["dropout"],
-            local_files_only=True,
         )
         self._model = AutoModelForSequenceClassification.from_pretrained(
-            MODEL_NAME, config=config, local_files_only=True
+            MODEL_NAME, config=config
         )
         self._model.to(self._device)
 
-        train_ds = TweetDataset(texts, y, self._tokenizer)
+        # Verify pretrained weights loaded (not random init)
+        sample_weight = self._model.roberta.embeddings.word_embeddings.weight[0, :5]
+        logger.info(f"Embedding sample (should NOT be near-zero): {sample_weight.tolist()}")
+
+        train_ds = TweetDataset(train_texts_final, train_labels_final, self._tokenizer)
+        monitor_ds = TweetDataset(monitor_texts, monitor_labels, self._tokenizer)
         train_loader = DataLoader(
             train_ds, batch_size=best_params["batch_size"], shuffle=True
         )
+        monitor_loader = DataLoader(
+            monitor_ds, batch_size=best_params["batch_size"], shuffle=False
+        )
 
-        class_weights = _compute_class_weights(y, self._device)
+        class_weights = _compute_class_weights(train_labels_final, self._device)
+        logger.info(f"Class weights: {class_weights.tolist()}")
+        logger.info(f"Label distribution: {np.bincount(train_labels_final).tolist()}")
         criterion = nn.CrossEntropyLoss(weight=class_weights)
 
         optimizer = torch.optim.AdamW(
@@ -357,8 +399,14 @@ class NeuralModel(BaseModel):
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-        self._model.train()
+        # Training with early stopping (same as CV folds)
+        best_state = None
+        best_monitor_f1 = 0.0
+        patience_counter = 0
+        patience = 2
+
         for epoch in range(best_params["num_epochs"]):
+            self._model.train()
             epoch_loss = 0.0
             for batch in train_loader:
                 input_ids = batch["input_ids"].to(self._device)
@@ -379,9 +427,43 @@ class NeuralModel(BaseModel):
                 epoch_loss += loss.item()
 
             avg_loss = epoch_loss / len(train_loader)
-            logger.info(f"Epoch {epoch + 1}/{best_params['num_epochs']}: loss={avg_loss:.4f}")
 
-        # Compute train accuracy
+            # Monitor validation
+            self._model.eval()
+            all_preds = []
+            all_labels_monitor = []
+            with torch.no_grad():
+                for batch in monitor_loader:
+                    input_ids = batch["input_ids"].to(self._device)
+                    attention_mask = batch["attention_mask"].to(self._device)
+                    outputs = self._model(input_ids=input_ids, attention_mask=attention_mask)
+                    preds = outputs.logits.argmax(dim=-1).cpu().numpy()
+                    all_preds.extend(preds)
+                    all_labels_monitor.extend(batch["labels"].numpy())
+
+            monitor_f1 = f1_score(all_labels_monitor, all_preds, average="macro")
+            logger.info(
+                f"Epoch {epoch + 1}/{best_params['num_epochs']}: "
+                f"loss={avg_loss:.4f}, monitor_f1={monitor_f1:.4f}"
+            )
+
+            if monitor_f1 > best_monitor_f1:
+                best_monitor_f1 = monitor_f1
+                best_state = {k: v.cpu().clone() for k, v in self._model.state_dict().items()}
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    logger.info(f"Early stopping at epoch {epoch + 1}")
+                    break
+
+        # Restore best model weights
+        if best_state is not None:
+            self._model.load_state_dict(best_state)
+            self._model.to(self._device)
+            logger.info(f"Restored best model (monitor F1={best_monitor_f1:.4f})")
+
+        # Compute train accuracy on full training set
         train_preds = self.predict_batch(texts)
         train_acc = sum(p == l for p, l in zip(train_preds, labels)) / len(labels)
         logger.info(f"Train accuracy: {train_acc:.3f}")
@@ -455,6 +537,11 @@ class NeuralModel(BaseModel):
         }
         with open(directory / "model.json", "w") as f:
             json.dump(meta, f, indent=2)
+
+        # Save best hyperparameters separately for --skip-tuning
+        if "tuning" in self._training_meta:
+            with open(directory / "best_params.json", "w") as f:
+                json.dump(self._training_meta["tuning"], f, indent=2)
 
         logger.info(f"Saved to {directory}")
 
