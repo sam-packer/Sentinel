@@ -543,7 +543,7 @@ def train(model_name: str, test_size: float, seed: int, tune: bool):
         if params_path.exists():
             with open(params_path) as f:
                 saved_params = json.load(f)
-            click.echo(f"Using saved hyperparameters (pass --tune to retune)")
+            click.echo("Using saved hyperparameters (pass --tune to retune)")
         else:
             click.echo("No saved params found, running Optuna tuning...")
 

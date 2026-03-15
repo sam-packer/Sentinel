@@ -18,9 +18,10 @@ from pathlib import Path
 import numpy as np
 import optuna
 import torch
-import torch.nn as nn
+import transformers
 from sklearn.metrics import f1_score
 from sklearn.model_selection import StratifiedKFold
+from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 
@@ -34,10 +35,6 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 logging.getLogger("transformers").setLevel(logging.ERROR)
-
-# Disable transformers' own progress bars and verbosity
-# (separate from Python's logging — transformers has its own system)
-import transformers
 transformers.logging.set_verbosity_error()
 transformers.logging.disable_progress_bar()
 
@@ -163,7 +160,7 @@ def _train_one_fold(
     patience_counter = 0
     patience = 2
 
-    for epoch in range(params["num_epochs"]):
+    for _ in range(params["num_epochs"]):
         model.train()
         epoch_loss = 0.0
         n_batches = 0
@@ -198,7 +195,6 @@ def _train_one_fold(
                 all_labels.extend(batch["labels"].numpy())
 
         val_f1 = f1_score(all_labels, all_preds, average="macro")
-        avg_loss = epoch_loss / max(n_batches, 1)
 
         if val_f1 > best_f1:
             best_f1 = val_f1
@@ -343,7 +339,8 @@ class NeuralModel(BaseModel):
 
         # 90/10 split for train/monitor
         n_monitor = max(int(len(texts) * 0.1), 1)
-        indices = np.random.RandomState(SEED).permutation(len(texts))
+        rng = np.random.default_rng(SEED)
+        indices = rng.permutation(len(texts))
         monitor_idx = indices[:n_monitor]
         train_idx = indices[n_monitor:]
 
