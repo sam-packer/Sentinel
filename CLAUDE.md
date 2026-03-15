@@ -37,6 +37,11 @@ uv run enrich                  # Re-enrich existing claims
 uv run enrich --days 7         # Re-enrich claims from last 7 days
 uv run enrich --status         # Check background enrichment progress
 uv run serve                   # Start Flask API
+uv run train baseline          # Train naive baseline (majority class)
+uv run train classical         # Train classical model (Optuna-tuned LR + XGBoost, 200 trials each)
+uv run evaluate baseline       # Evaluate baseline on test set
+uv run evaluate classical      # Evaluate classical model on test set
+uv run predict classical "tweet text"  # Predict label for a tweet
 ```
 
 ## Testing
@@ -62,11 +67,19 @@ Tests use mocks for external dependencies (Twitter, yfinance, DuckDuckGo) and ru
 - `src/data/db.py` — PostgreSQL persistence
 - `src/api/` — Flask API (app factory + routes)
 - `src/config.py` — YAML + env configuration
+- `src/models/` — ML models (BaseModel interface, feature extraction, training)
+  - `baseline.py` — Naive majority class predictor
+  - `classical.py` — Optuna-tuned LR + XGBoost ensemble
+  - `features.py` — Tweet text → numerical feature extraction
+  - `evaluate.py` — Metrics (accuracy, precision, recall, F1, confusion matrix)
+  - `data.py` — Data loading and train/test splitting
 
 ## Documentation
 
 - `docs/setup.md` — Full installation, PostgreSQL setup, Twitter accounts, deployment
 - `docs/api.md` — API endpoint reference with examples
+- `docs/decisions/` — Decision log documenting design choices and rationale
+- `docs/project_framing.md` — High-level project framing for the course report
 
 ## Configuration
 
