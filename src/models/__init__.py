@@ -12,6 +12,7 @@ from pathlib import Path
 MODEL_REGISTRY = {
     "baseline": "src.models.baseline:MajorityClassModel",
     "classical": "src.models.classical:ClassicalModel",
+    "neural": "src.models.neural:NeuralModel",
 }
 
 MODEL_DIR = Path("models")

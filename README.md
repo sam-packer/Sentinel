@@ -232,6 +232,7 @@ saves the model to `models/<name>/`, and prints test set metrics.
 Available models:
 - `baseline` — Naive majority class predictor. Always predicts the most common label (~78% accuracy, 0% exaggeration recall). The floor any real model must beat.
 - `classical` — Optuna-tuned TF-IDF + logistic regression. 200 Optuna trials with stratified 3-fold CV optimizing macro F1. Saves model weights, TF-IDF vectorizer, and top predictive words for interpretability.
+- `neural` — Fine-tuned BERTweet (vinai/bertweet-base). 50 Optuna trials with stratified 3-fold CV optimizing macro F1. Tunes learning rate, weight decay, warmup, epochs, batch size, and dropout. Requires GPU.
 
 ```bash
 uv run train baseline              # train the majority-class baseline
@@ -246,10 +247,14 @@ Model artifacts are saved to `models/<name>/`:
 models/
 ├── baseline/
 │   └── model.json              # majority class + class counts
-└── classical/
-    ├── lr.pkl                  # logistic regression weights
-    ├── tfidf.pkl               # TF-IDF vectorizer (vocabulary + weights)
-    └── model.json              # hyperparams, top predictive words
+├── classical/
+│   ├── lr.pkl                  # logistic regression weights
+│   ├── tfidf.pkl               # TF-IDF vectorizer (vocabulary + weights)
+│   └── model.json              # hyperparams, top predictive words
+└── neural/
+    ├── model/                  # BERTweet fine-tuned weights (safetensors)
+    ├── tokenizer/              # BERTweet tokenizer files
+    └── model.json              # hyperparams, training metadata
 ```
 
 ### evaluate

@@ -38,9 +38,11 @@ uv run enrich --days 7         # Re-enrich claims from last 7 days
 uv run enrich --status         # Check background enrichment progress
 uv run serve                   # Start Flask API
 uv run train baseline          # Train naive baseline (majority class)
-uv run train classical         # Train classical model (Optuna-tuned LR + XGBoost, 200 trials each)
+uv run train classical         # Train classical model (Optuna-tuned TF-IDF + LR, 200 trials)
+uv run train neural            # Train neural model (fine-tuned BERTweet, 50 trials, requires GPU)
 uv run evaluate baseline       # Evaluate baseline on test set
 uv run evaluate classical      # Evaluate classical model on test set
+uv run evaluate neural         # Evaluate neural model on test set
 uv run predict classical "tweet text"  # Predict label for a tweet
 ```
 
