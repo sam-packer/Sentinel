@@ -84,36 +84,34 @@ def _show_status(name: str) -> None:
         minutes = int(elapsed.total_seconds() // 60)
         seconds = int(elapsed.total_seconds() % 60)
 
-        click.echo(f"Sentinel {name.title()} Status")
-        click.echo(f"  State:    {st.state}")
-        click.echo(f"  Started:  {minutes}m {seconds}s ago")
-        click.echo(f"  Phase:    {st.phase}")
+        click.echo(f"Sentinel {name.title()} — {minutes}m {seconds}s elapsed (PID {st.pid})")
+        click.echo("")
 
         if st.state == "scraping":
             pct = (st.tickers_scraped / st.tickers_total * 100) if st.tickers_total > 0 else 0
-            click.echo(f"  Tickers:  {st.tickers_scraped}/{st.tickers_total} ({pct:.0f}%)")
-            click.echo(f"  Tweets:   {st.scrape_tweets_found} found so far")
+            filled = int(pct / 100 * 20)
+            bar = "\u2588" * filled + "\u2591" * (20 - filled)
+            click.echo(f"  Scraping  [{bar}] {st.tickers_scraped}/{st.tickers_total} tickers ({pct:.0f}%)")
+            click.echo(f"            {st.scrape_tweets_found} tweets found")
             if st.current_ticker:
-                click.echo(f"  Current:  {st.current_ticker}")
+                click.echo(f"            currently: {st.current_ticker}")
+
+        elif st.phase.startswith("classifying") and st.accounts_total > 0:
+            cls_pct = st.accounts_classified / st.accounts_total * 100
+            filled = int(cls_pct / 100 * 20)
+            bar = "\u2588" * filled + "\u2591" * (20 - filled)
+            click.echo(f"  Classify  [{bar}] {st.accounts_classified}/{st.accounts_total} accounts ({cls_pct:.0f}%)")
+
         else:
-            if st.phase.startswith("classifying") and st.accounts_total > 0:
-                cls_pct = st.accounts_classified / st.accounts_total * 100
-                filled = int(cls_pct / 100 * 20)
-                bar = "\u2588" * filled + "\u2591" * (20 - filled)
-                click.echo(
-                    f"  Classify: {st.accounts_classified}/{st.accounts_total} "
-                    f"({cls_pct:.0f}%) [{bar}]"
-                )
             total = st.scraped
             done = st.enriched
             pct = (done / total * 100) if total > 0 else 0
-            click.echo(f"  Progress: {done}/{total} claims enriched ({pct:.0f}%)")
+            filled = int(pct / 100 * 20)
+            bar = "\u2588" * filled + "\u2591" * (20 - filled)
+            click.echo(f"  Enrich    [{bar}] {done}/{total} claims ({pct:.0f}%)")
+            click.echo(f"            {st.labeled} labeled, {st.failed} failed")
             if st.current_ticker:
-                click.echo(f"  Current:  {st.current_ticker}")
-            click.echo(f"  Labeled:  {st.labeled}")
-            click.echo(f"  Failed:   {st.failed}")
-
-        click.echo(f"  PID:      {st.pid}")
+                click.echo(f"            currently: {st.current_ticker}")
 
         lf = _log_file(name)
         if lf.exists():

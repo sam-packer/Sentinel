@@ -571,6 +571,7 @@ async def run_enrichment(
             )
 
         status.scraped = len(claims)
+        status.phase = "enriching"
         _update_status(status, name)
         logger.info(f"Enriching {len(claims)} claims")
 
