@@ -48,6 +48,7 @@ Before enriching tweets, Sentinel classifies each account as human or bot using 
 automatically during collection — each account is classified once and the result is cached in the `accounts` table.
 
 The classifier receives the account's username and up to 5 sample tweets, then categorizes it as one of:
+
 - **human** — real person sharing opinions or analysis
 - **news_ticker** — automated account reposting headlines verbatim
 - **repost_bot** — account that copies or auto-generates content
@@ -192,15 +193,15 @@ Labeling fields:
 
 Account fields (stored in `accounts` table):
 
-| Field              | Description                                                                |
-|--------------------|----------------------------------------------------------------------------|
-| `username`         | Twitter handle. Primary key.                                               |
-| `is_bot`           | Whether the account is a bot (classified by LLM-as-judge).                 |
-| `bot_reason`       | Why the account was classified as bot/human. Includes type and explanation. |
-| `total_claims`     | Total labeled claims from this account.                                    |
-| `exaggerated_count`| How many claims were labeled exaggerated.                                  |
-| `accurate_count`   | How many claims were labeled accurate.                                     |
-| `grifter_score`    | Ratio of exaggerated to total claims. Null if fewer than 5 claims.         |
+| Field               | Description                                                                 |
+|---------------------|-----------------------------------------------------------------------------|
+| `username`          | Twitter handle. Primary key.                                                |
+| `is_bot`            | Whether the account is a bot (classified by LLM-as-judge).                  |
+| `bot_reason`        | Why the account was classified as bot/human. Includes type and explanation. |
+| `total_claims`      | Total labeled claims from this account.                                     |
+| `exaggerated_count` | How many claims were labeled exaggerated.                                   |
+| `accurate_count`    | How many claims were labeled accurate.                                      |
+| `grifter_score`     | Ratio of exaggerated to total claims. Null if fewer than 5 claims.          |
 
 ## Commands
 
@@ -235,11 +236,11 @@ Re-enriches existing raw claims with fresh price and news data. Useful after cha
 earlier enrichment runs failed due to market closures.
 
 ```bash
-uv run enrich                     # re-enrich all claims
-uv run enrich --days 7            # only claims from the last 7 days
-uv run enrich --unlabeled         # only claims missing labels
-uv run enrich --tickers LMT,RTX   # specific tickers only
-uv run enrich --background        # run in background
+uv run enrich                      # re-enrich all claims
+uv run enrich --days 7             # only claims from the last 7 days
+uv run enrich --unlabeled          # only claims missing labels
+uv run enrich --tickers LMT,RTX    # specific tickers only
+uv run enrich --background         # run in background
 uv run enrich --status             # check background progress
 uv run enrich --stop               # stop background enrichment
 ```
@@ -271,9 +272,13 @@ Trains a model on labeled claims from the database. Loads data, splits into trai
 saves the model to `models/<name>/`, and prints test set metrics.
 
 Available models:
-- `baseline` — Naive majority class predictor. Always predicts the most common label (~78% accuracy, 0% exaggeration recall). The floor any real model must beat.
-- `classical` — Optuna-tuned TF-IDF + logistic regression. 200 Optuna trials with stratified 3-fold CV optimizing macro F1. Saves model weights, TF-IDF vectorizer, and top predictive words for interpretability.
-- `neural` — Fine-tuned BERTweet (vinai/bertweet-base). 50 Optuna trials with stratified 3-fold CV optimizing macro F1. Tunes learning rate, weight decay, warmup, epochs, batch size, and dropout. Requires GPU.
+
+- `baseline` — Naive majority class predictor. Always predicts the most common label (~78% accuracy, 0% exaggeration
+  recall). The floor any real model must beat.
+- `classical` — Optuna-tuned TF-IDF + logistic regression. 200 Optuna trials with stratified 3-fold CV optimizing macro
+  F1. Saves model weights, TF-IDF vectorizer, and top predictive words for interpretability.
+- `neural` — Fine-tuned BERTweet (vinai/bertweet-base). 50 Optuna trials with stratified 3-fold CV optimizing macro F1.
+  Tunes learning rate, weight decay, warmup, epochs, batch size, and dropout. Requires GPU.
 
 ```bash
 uv run train baseline              # train the majority-class baseline
