@@ -264,8 +264,21 @@ class SentinelDB:
             )
         conn.commit()
 
-    def insert_labeled_claim(self, labeled: LabeledClaim) -> None:
-        """Insert a labeled claim (updates raw_claim fields too)."""
+    def insert_labeled_claim(
+        self,
+        labeled: LabeledClaim,
+        label_table: str = "naive_labeled_claims",
+    ) -> None:
+        """Insert a labeled claim (updates raw_claim fields too).
+
+        Args:
+            labeled: The labeled claim to insert.
+            label_table: Which label table to write to
+                ("naive_labeled_claims" or "improved_labeled_claims").
+        """
+        if label_table not in ("naive_labeled_claims", "improved_labeled_claims"):
+            raise ValueError(f"Invalid label_table: {label_table}")
+
         conn = self._get_conn()
         with conn.transaction(), conn.cursor() as cur:
             # Upsert the raw claim data
@@ -304,10 +317,10 @@ class SentinelDB:
                     labeled.posted_during_market_hours, labeled.volume_at_tweet,
                 ),
             )
-            # Upsert the label
+            # Upsert the label into the specified table
             cur.execute(
-                """
-                INSERT INTO naive_labeled_claims
+                f"""
+                INSERT INTO {label_table}
                     (tweet_id, label, claimed_direction, actual_direction,
                      exaggeration_score, news_summary)
                 VALUES (%s, %s, %s, %s, %s, %s)

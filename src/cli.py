@@ -362,22 +362,33 @@ def collect(
               help="Only enrich claims from the last N days")
 @click.option("--unlabeled", is_flag=True, help="Only enrich claims that haven't been labeled yet")
 @click.option("--rejudge", is_flag=True, help="Reclassify ALL accounts, not just unclassified ones")
+@click.option("--naive", "labeler", flag_value="naive", default=True,
+              help="Use naive (keyword-based) labeler (default)")
+@click.option("--improved", "labeler", flag_value="improved",
+              help="Use improved (NLP-enhanced) labeler")
 @click.option("--background", is_flag=True, help="Run in background")
 @click.option("--status", "show_status", is_flag=True, help="Check background enrichment progress")
 @click.option("--stop", "do_stop", is_flag=True, help="Stop background enrichment")
 @click.option("--_daemonized", is_flag=True, hidden=True)
+@click.option("--_labeler", default=None, hidden=True)
 def enrich(
     tickers: str | None,
     days: int | None,
     unlabeled: bool,
     rejudge: bool,
+    labeler: str,
     background: bool,
     show_status: bool,
     do_stop: bool,
     _daemonized: bool,
+    _labeler: str | None,
 ):
     """Re-enrich existing raw claims with fresh price and news data."""
     _init()
+
+    # When launched as a background subprocess, use the hidden --_labeler flag
+    if _labeler is not None:
+        labeler = _labeler
 
     if show_status:
         _show_status("enrich")
@@ -412,7 +423,7 @@ def enrich(
         if enrich_bin is None:
             enrich_bin = str(Path(sys.executable).parent / "enrich")
 
-        cmd = [enrich_bin, "--_daemonized"]
+        cmd = [enrich_bin, "--_daemonized", "--_labeler", labeler]
         if tickers:
             cmd.extend(["--tickers", tickers])
         if days is not None:
@@ -423,7 +434,7 @@ def enrich(
             cmd.append("--rejudge")
 
         pid = _launch_background(cmd, "data/enrich.log")
-        click.echo(f"Enrichment started in background (PID {pid})")
+        click.echo(f"Enrichment ({labeler} labeler) started in background (PID {pid})")
         click.echo("  uv run enrich --status  — check progress")
         click.echo("  uv run enrich --stop    — stop enrichment")
         return
@@ -432,7 +443,7 @@ def enrich(
     from .collector import read_status, run_enrichment
 
     if not _daemonized:
-        parts = ["Re-enriching"]
+        parts = [f"Re-enriching ({labeler} labeler)"]
         if unlabeled:
             parts.append("unlabeled")
         parts.append("claims")
@@ -449,6 +460,7 @@ def enrich(
         until=until,
         unlabeled_only=unlabeled,
         rejudge=rejudge,
+        labeler=labeler,
     ))
 
     if not _daemonized:
@@ -592,39 +604,48 @@ def _get_model(name: str):
 @click.option("--test-size", default=0.2, type=float, help="Fraction held out for testing (default: 0.2)")
 @click.option("--seed", default=42, type=int, help="Random seed for train/test split")
 @click.option("--tune", is_flag=True, help="Run Optuna hyperparameter tuning (default: reuse saved params)")
-def train(model_name: str, test_size: float, seed: int, tune: bool):
-    """Train a model. Usage: uv run train baseline"""
+@click.option("--naive", "labels", flag_value="naive", default=True,
+              help="Train on naive labels (default)")
+@click.option("--improved", "labels", flag_value="improved",
+              help="Train on improved labels")
+def train(model_name: str, test_size: float, seed: int, tune: bool, labels: str):
+    """Train a model. Usage: uv run train baseline [--naive|--improved]"""
     _init()
 
     if not config.database.url:
         click.echo("Error: DATABASE_URL not set.", err=True)
         sys.exit(1)
 
+    import json
     from .data.db import SentinelDB
     from .models.data import load_labeled_claims, prepare_split
+    from .models.evaluate import compute_metrics, format_metrics, format_report
 
+    label_table = f"{labels}_labeled_claims"
     model = _get_model(model_name)
 
     # Load data
-    click.echo("Loading labeled claims from database...")
+    click.echo(f"Loading claims from {label_table}...")
     db = SentinelDB(config.database.url)
     db.connect()
-    claims = load_labeled_claims(db)
+    claims = load_labeled_claims(db, label_table=label_table)
     db.close()
 
     if not claims:
-        click.echo("No labeled claims found. Run 'uv run collect' first.", err=True)
+        click.echo(f"No claims found in {label_table}. Run 'uv run enrich --{labels}' first.", err=True)
         sys.exit(1)
 
     # Split
     split = prepare_split(claims, test_size=test_size, seed=seed)
     click.echo(f"Data: {split.train_size} train, {split.test_size} test")
 
+    # Model directory: models/{name}/{labels}/
+    model_dir = MODEL_DIR / model.name / labels
+
     # Load saved hyperparameters unless --tune is passed
     saved_params = None
     if not tune:
-        import json
-        params_path = MODEL_DIR / model.name / "best_params.json"
+        params_path = model_dir / "best_params.json"
         if params_path.exists():
             with open(params_path) as f:
                 saved_params = json.load(f)
@@ -633,7 +654,7 @@ def train(model_name: str, test_size: float, seed: int, tune: bool):
             click.echo("No saved params found, running Optuna tuning...")
 
     # Train
-    click.echo(f"Training {model.name}...")
+    click.echo(f"Training {model.name} on {labels} labels...")
     if saved_params is not None:
         metadata = model.train(split.train_texts, split.train_labels, saved_params=saved_params)
     else:
@@ -642,18 +663,78 @@ def train(model_name: str, test_size: float, seed: int, tune: bool):
         click.echo(f"  {key}: {value}")
 
     # Save
-    model_dir = MODEL_DIR / model.name
     model.save(model_dir)
     click.echo(f"Saved to {model_dir}/")
 
-    # Quick evaluation on test set
-    from .models.evaluate import compute_metrics, format_metrics
-
+    # Evaluate on test set and save results
     predictions = model.predict_batch(split.test_texts)
     metrics = compute_metrics(predictions, split.test_labels)
+
+    # Collect mispredictions with full context while everything is in memory
+    from .models.data import EXCLUDE_LABELS
+    import random as _random
+
+    filtered_claims = [c for c in claims if c["label"] not in EXCLUDE_LABELS]
+    rng = _random.Random(seed)
+    rng.shuffle(filtered_claims)
+    split_idx = int(len(filtered_claims) * (1 - test_size))
+    test_claims = filtered_claims[split_idx:]
+
+    mispredictions = []
+    for i, (pred, actual) in enumerate(zip(predictions, split.test_labels)):
+        if pred != actual:
+            claim = test_claims[i]
+            mispredictions.append({
+                "text": claim["text"],
+                "ticker": claim["ticker"],
+                "username": claim.get("username"),
+                "predicted": pred,
+                "actual": actual,
+                "price_change_pct": claim.get("price_change_pct"),
+                "claimed_direction": claim.get("claimed_direction"),
+                "actual_direction": claim.get("actual_direction"),
+                "has_catalyst": claim.get("has_catalyst"),
+                "catalyst_type": claim.get("catalyst_type"),
+                "exaggeration_score": claim.get("exaggeration_score"),
+            })
+
+    # Save evaluation JSON
+    results_path = model_dir / "evaluation.json"
+    with open(results_path, "w") as f:
+        json.dump({
+            "model": model.name,
+            "labels": labels,
+            "label_table": label_table,
+            "test_size": split.test_size,
+            "train_size": split.train_size,
+            "seed": seed,
+            "metrics": metrics,
+        }, f, indent=2)
+
+    # Save mispredictions
+    errors_path = model_dir / "mispredictions.json"
+    with open(errors_path, "w") as f:
+        json.dump(mispredictions, f, indent=2, default=str)
+
+    # Write markdown report (includes misprediction examples)
+    report = format_report(
+        model_name=model.name,
+        labels=labels,
+        train_size=split.train_size,
+        test_size=split.test_size,
+        seed=seed,
+        metrics=metrics,
+        training_meta=metadata,
+        mispredictions=mispredictions,
+    )
+    report_path = model_dir / "report.md"
+    report_path.write_text(report, encoding="utf-8")
+
     click.echo("")
-    click.echo("Test set results:")
+    click.echo(f"Test set results ({labels} labels):")
     click.echo(format_metrics(metrics))
+    click.echo(f"\n{len(mispredictions)} mispredictions saved to {errors_path}")
+    click.echo(f"Report saved to {report_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -664,42 +745,66 @@ def train(model_name: str, test_size: float, seed: int, tune: bool):
 @click.argument("model_name")
 @click.option("--seed", default=42, type=int, help="Random seed (must match training)")
 @click.option("--test-size", default=0.2, type=float, help="Test fraction (must match training)")
-def evaluate(model_name: str, seed: int, test_size: float):
-    """Evaluate a trained model. Usage: uv run evaluate baseline"""
+@click.option("--naive", "labels", flag_value="naive", default=True,
+              help="Evaluate against naive labels (default)")
+@click.option("--improved", "labels", flag_value="improved",
+              help="Evaluate against improved labels")
+def evaluate(model_name: str, seed: int, test_size: float, labels: str):
+    """Evaluate a trained model. Usage: uv run evaluate baseline [--naive|--improved]"""
     _init()
 
     if not config.database.url:
         click.echo("Error: DATABASE_URL not set.", err=True)
         sys.exit(1)
 
+    import json
     from .data.db import SentinelDB
     from .models.data import load_labeled_claims, prepare_split
     from .models.evaluate import compute_metrics, format_metrics
 
+    label_table = f"{labels}_labeled_claims"
     model = _get_model(model_name)
 
-    # Load saved model
-    model_dir = MODEL_DIR / model.name
+    # Load saved model from the label-specific directory
+    model_dir = MODEL_DIR / model.name / labels
     if not (model_dir / "model.json").exists():
-        click.echo(f"No trained model found at {model_dir}/. Run 'uv run train {model_name}' first.", err=True)
+        click.echo(
+            f"No trained model found at {model_dir}/. "
+            f"Run 'uv run train {model_name} --{labels}' first.",
+            err=True,
+        )
         sys.exit(1)
 
     model.load(model_dir)
 
     # Load and split data (same seed = same split)
-    click.echo("Loading labeled claims from database...")
+    click.echo(f"Loading claims from {label_table}...")
     db = SentinelDB(config.database.url)
     db.connect()
-    claims = load_labeled_claims(db)
+    claims = load_labeled_claims(db, label_table=label_table)
     db.close()
 
     split = prepare_split(claims, test_size=test_size, seed=seed)
-    click.echo(f"Evaluating {model.name} on {split.test_size} test samples")
+    click.echo(f"Evaluating {model.name} on {split.test_size} test samples ({labels} labels)")
     click.echo("")
 
     predictions = model.predict_batch(split.test_texts)
     metrics = compute_metrics(predictions, split.test_labels)
     click.echo(format_metrics(metrics))
+
+    # Save evaluation results
+    results_path = model_dir / "evaluation.json"
+    with open(results_path, "w") as f:
+        json.dump({
+            "model": model.name,
+            "labels": labels,
+            "label_table": label_table,
+            "test_size": split.test_size,
+            "train_size": split.train_size,
+            "seed": seed,
+            "metrics": metrics,
+        }, f, indent=2)
+    click.echo(f"\nEvaluation saved to {results_path}")
 
 
 # ---------------------------------------------------------------------------

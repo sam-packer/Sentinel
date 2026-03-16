@@ -201,13 +201,24 @@ def _filter_mature_claims(claims, logger_instance=logger):
     return mature
 
 
-async def _enrich_and_label(claims, db, status, name, is_shutdown):
-    """Shared enrichment loop used by both collect and enrich pipelines."""
-    from .data.labeler import label_claim
+async def _enrich_and_label(claims, db, status, name, is_shutdown, labeler="naive"):
+    """Shared enrichment loop used by both collect and enrich pipelines.
+
+    Args:
+        labeler: "naive" or "improved" — which labeling system to use.
+    """
+    if labeler == "improved":
+        from .data.improved_labeler import label_claim_improved as do_label
+        label_table = "improved_labeled_claims"
+    else:
+        from .data.labeler import label_claim as do_label
+        label_table = "naive_labeled_claims"
+
     from .news_fetcher import classify_catalyst, fetch_news_for_claim
     from .price_fetcher import PriceFetcher
 
     pf = PriceFetcher()
+    logger.info(f"Using {labeler} labeler → {label_table}")
 
     for i, claim in enumerate(claims):
         if is_shutdown():
@@ -230,11 +241,11 @@ async def _enrich_and_label(claims, db, status, name, is_shutdown):
             status.enriched = i + 1
             status.current_ticker = claim.ticker
 
-            labeled = label_claim(claim)
+            labeled = do_label(claim)
             status.labeled += 1
 
             if db:
-                db.insert_labeled_claim(labeled)
+                db.insert_labeled_claim(labeled, label_table=label_table)
 
             _update_status(status, name)
 
@@ -514,11 +525,15 @@ async def run_enrichment(
     until: datetime | None = None,
     unlabeled_only: bool = False,
     rejudge: bool = False,
+    labeler: str = "naive",
 ) -> None:
     """Re-enrich existing raw claims without scraping.
 
     Reads claims from the database, fetches fresh price/news data,
     re-labels, and updates the database.
+
+    Args:
+        labeler: "naive" or "improved" — which labeling system to use.
     """
     from .data.db import SentinelDB
 
@@ -573,9 +588,9 @@ async def run_enrichment(
         status.scraped = len(claims)
         status.phase = "enriching"
         _update_status(status, name)
-        logger.info(f"Enriching {len(claims)} claims")
+        logger.info(f"Enriching {len(claims)} claims with {labeler} labeler")
 
-        await _enrich_and_label(claims, db, status, name, is_shutdown)
+        await _enrich_and_label(claims, db, status, name, is_shutdown, labeler=labeler)
 
         db.close()
 
