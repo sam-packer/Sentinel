@@ -12,8 +12,6 @@ User=sentinel
 Group=sentinel
 WorkingDirectory=/opt/sentinel/app
 
-EnvironmentFile=/opt/sentinel/app/.env
-
 ExecStart=/home/sentinel/.local/bin/uv run serve --port 5000 --workers 4
 
 Restart=on-failure
@@ -31,7 +29,7 @@ TimeoutStartSec=30
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=sentinel-backend
+SyslogIdentifier=sentinel
 
 [Install]
 WantedBy=multi-user.target

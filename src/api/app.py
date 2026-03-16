@@ -7,7 +7,7 @@ and API route registration.
 
 import logging
 
-from flask import Flask, jsonify
+from flask import Flask
 from flask_cors import CORS
 
 logger = logging.getLogger("sentinel.api")
@@ -51,22 +51,6 @@ def create_app(database_url: str | None = None) -> Flask:
     # Register API routes
     from .routes import api_bp
     app.register_blueprint(api_bp, url_prefix="/api")
-
-    @app.route("/")
-    def root():
-        return jsonify({
-            "service": "Sentinel API",
-            "docs": "/api/health",
-            "endpoints": [
-                "/api/health",
-                "/api/feed",
-                "/api/stats",
-                "/api/stocks",
-                "/api/accounts",
-                "/api/leaderboard",
-                "/api/predict",
-            ],
-        })
 
     logger.info("Sentinel Flask app created")
     return app
