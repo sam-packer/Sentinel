@@ -328,7 +328,7 @@ def label_claim_improved(raw: RawClaim) -> LabeledClaim:
     Same return type as the naive labeler for compatibility.
     Writes to the improved_labeled_claims table.
     """
-    claimed, reason = parse_direction_improved(raw.text)
+    claimed, _reason = parse_direction_improved(raw.text)
     actual = _actual_direction_for_ticker(raw.price_change_pct, raw.ticker)
     intensity = _intensity_score(raw.text)
 
