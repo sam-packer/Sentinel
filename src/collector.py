@@ -53,6 +53,9 @@ class CollectionStatus:
     tickers_total: int = 0
     scrape_tweets_found: int = 0
     current_ticker: str | None = None
+    # Classification progress
+    accounts_classified: int = 0
+    accounts_total: int = 0
     # Enrichment progress
     scraped: int = 0
     enriched: int = 0
@@ -163,37 +166,112 @@ def _is_market_hours(dt: datetime) -> bool:
     return market_open <= et_dt <= market_close
 
 
+MAX_TWEET_AGE = timedelta(days=90)
+
+
+def _next_trading_day(dt: datetime) -> datetime:
+    """Return the start of the next trading day at or after dt (9:30 AM ET).
+
+    Skips weekends. Does not handle market holidays — those will fail
+    gracefully in the price fetcher.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+    except ImportError:
+        et = timezone(timedelta(hours=-5))
+
+    et_dt = dt.astimezone(et)
+
+    # If it's a weekday and before market close, this day counts
+    if et_dt.weekday() < 5 and et_dt.hour < 16:
+        return dt
+
+    # Otherwise advance to next weekday 9:30 AM ET
+    next_day = et_dt.replace(hour=9, minute=30, second=0, microsecond=0) + timedelta(days=1)
+    while next_day.weekday() >= 5:
+        next_day += timedelta(days=1)
+    return next_day.astimezone(timezone.utc)
+
+
 def _filter_mature_claims(claims, logger_instance=logger):
-    """Remove tweets less than 25h old (24h price window hasn't elapsed)."""
+    """Filter claims that can't be enriched yet.
+
+    Removes:
+    - Tweets less than 25h old (price window hasn't elapsed)
+    - Tweets older than 90 days (stale search results)
+    - Tweets whose 24h-later price window hasn't reached a trading day yet
+      (e.g., Friday afternoon tweets checked on Saturday)
+    """
     now = datetime.now(tz=timezone.utc)
     min_age = timedelta(hours=25)
     mature = []
-    skipped = 0
+    too_new = 0
+    too_old = 0
+    no_trading_day = 0
+
     for claim in claims:
         tweet_time = claim.created_at
         if tweet_time.tzinfo is None:
             tweet_time = tweet_time.replace(tzinfo=timezone.utc)
-        if now - tweet_time < min_age:
-            skipped += 1
-        else:
-            mature.append(claim)
 
-    if skipped:
+        if now - tweet_time < min_age:
+            too_new += 1
+            continue
+
+        if now - tweet_time > MAX_TWEET_AGE:
+            too_old += 1
+            continue
+
+        # Check that the 24h-later window has reached a trading day
+        # that has already closed (so price data is available)
+        price_target = tweet_time + timedelta(hours=24)
+        next_trade = _next_trading_day(price_target)
+        # Need the trading day to have closed (4 PM ET + 1h buffer)
+        trade_close = next_trade + timedelta(hours=7, minutes=30)  # 9:30 + 7:30 = 17:00 (5 PM ET buffer)
+        if now < trade_close:
+            no_trading_day += 1
+            continue
+
+        mature.append(claim)
+
+    if too_new:
         logger_instance.warning(
-            f"Skipped {skipped} tweets less than 25h old — "
-            f"the 24h price window hasn't elapsed yet. "
-            f"Proceeding with {len(mature)} mature tweets."
+            f"Skipped {too_new} tweets less than 25h old — "
+            f"the 24h price window hasn't elapsed yet."
         )
+    if too_old:
+        logger_instance.warning(
+            f"Skipped {too_old} stale tweets older than {MAX_TWEET_AGE.days} days."
+        )
+    if no_trading_day:
+        logger_instance.warning(
+            f"Skipped {no_trading_day} tweets — the 24h price window "
+            f"hasn't reached a closed trading day yet."
+        )
+    if too_new or too_old or no_trading_day:
+        logger_instance.info(f"Proceeding with {len(mature)} tweets.")
     return mature
 
 
-async def _enrich_and_label(claims, db, status, name, is_shutdown):
-    """Shared enrichment loop used by both collect and enrich pipelines."""
-    from .data.labeler import label_claim
+async def _enrich_and_label(claims, db, status, name, is_shutdown, labeler="naive"):
+    """Shared enrichment loop used by both collect and enrich pipelines.
+
+    Args:
+        labeler: "naive" or "improved" — which labeling system to use.
+    """
+    if labeler == "improved":
+        from .data.improved_labeler import label_claim_improved as do_label
+        label_table = "improved_labeled_claims"
+    else:
+        from .data.labeler import label_claim as do_label
+        label_table = "naive_labeled_claims"
+
     from .news_fetcher import classify_catalyst, fetch_news_for_claim
     from .price_fetcher import PriceFetcher
 
     pf = PriceFetcher()
+    logger.info(f"Using {labeler} labeler → {label_table}")
 
     for i, claim in enumerate(claims):
         if is_shutdown():
@@ -216,11 +294,11 @@ async def _enrich_and_label(claims, db, status, name, is_shutdown):
             status.enriched = i + 1
             status.current_ticker = claim.ticker
 
-            labeled = label_claim(claim)
+            labeled = do_label(claim)
             status.labeled += 1
 
             if db:
-                db.insert_labeled_claim(labeled)
+                db.insert_labeled_claim(labeled, label_table=label_table)
 
             _update_status(status, name)
 
@@ -230,12 +308,14 @@ async def _enrich_and_label(claims, db, status, name, is_shutdown):
             logger.warning(f"Failed to process claim {claim.tweet_id}: {e}")
 
 
-def _classify_new_accounts(claims, db, status, name):
+def _classify_new_accounts(claims, db, status, name, rejudge=False):
     """Classify any unclassified accounts from the current batch.
 
     Checks which usernames in the batch don't have a bot classification yet,
     classifies them via LLM-as-judge, and saves the results. Returns the set
     of bot usernames so the caller can filter them out.
+
+    If rejudge=True, reclassifies ALL accounts regardless of prior classification.
     """
     from .bot_detector import classify_accounts_batch
     from .config import config as app_config
@@ -245,6 +325,12 @@ def _classify_new_accounts(claims, db, status, name):
         logger.info("Bot detection disabled, skipping account classification")
         return set()
 
+    if rejudge:
+        logger.warning(
+            "Reclassifying all accounts (--rejudge). "
+            "This will call the LLM for every account."
+        )
+
     # Find unique usernames that haven't been classified
     usernames = {c.username for c in claims}
     unclassified = []
@@ -252,7 +338,7 @@ def _classify_new_accounts(claims, db, status, name):
 
     for username in usernames:
         account = db.get_account(username)
-        if account and account.classified_at is not None:
+        if not rejudge and account and account.classified_at is not None:
             if account.account_type != "human":
                 bot_usernames.add(username)
             continue
@@ -266,25 +352,39 @@ def _classify_new_accounts(claims, db, status, name):
 
     logger.info(f"Classifying {len(unclassified)} new accounts...")
     status.phase = f"classifying {len(unclassified)} accounts"
+    status.accounts_total = len(unclassified)
+    status.accounts_classified = 0
     _update_status(status, name)
 
-    results = classify_accounts_batch(unclassified, model=app_config.bot_detection.model)
-
     newly_classified = 0
-    for username, classification in results:
+
+    def _on_classified(username, classification, idx, total):
+        nonlocal newly_classified
+        # Save immediately so classifications survive crashes
         account = db.get_account(username) or Account(username=username)
         account.account_type = classification.account_type
-        account.classification_reason = f"{classification.account_type}: {classification.reason}"
+        account.classification_reason = (
+            f"{classification.account_type}: {classification.reason}"
+        )
         account.classified_at = datetime.now(timezone.utc)
         db.upsert_account(account)
 
         if classification.is_filtered:
             bot_usernames.add(username)
         newly_classified += 1
+
+        status.accounts_classified = idx + 1
+        _update_status(status, name)
         logger.info(
             f"  @{username}: {classification.account_type.upper()} "
             f"({classification.confidence:.0%}) — {classification.reason}"
         )
+
+    classify_accounts_batch(
+        unclassified,
+        model=app_config.bot_detection.model,
+        on_classified=_on_classified,
+    )
 
     logger.info(
         f"Account classification done: {newly_classified} classified, "
@@ -331,7 +431,14 @@ async def run_collection(
         status.tickers_total = len(ticker_list)
         _update_status(status, name)
 
-        # 1. Scrape
+        # 1. Connect DB early so scraped tweets are persisted incrementally
+        db = None
+        if database_url:
+            db = SentinelDB(database_url)
+            db.connect()
+            db.init_schema()
+
+        # 2. Scrape and persist each batch immediately
         scraper = DefenseStockScraper(config.twitter.db_path)
 
         def _on_ticker_done(ticker, total_claims, tickers_done, tickers_total):
@@ -340,6 +447,17 @@ async def run_collection(
             status.tickers_total = tickers_total
             status.scrape_tweets_found = total_claims
             _update_status(status, name)
+
+        def _persist_claims(batch):
+            """Insert a batch of claims to the DB so they survive crashes."""
+            if not db:
+                return
+            persisted = 0
+            for claim in batch:
+                db.insert_raw_claim(claim)
+                persisted += 1
+            if persisted:
+                logger.info(f"Persisted {persisted} raw claims to DB")
 
         if daily and since and until:
             # Split into per-day windows for even temporal distribution
@@ -365,10 +483,14 @@ async def run_collection(
                     until=day_end,
                 )
                 # Deduplicate across days
+                new_day_claims = []
                 for c in day_claims:
                     if c.tweet_id not in seen_ids:
                         seen_ids.add(c.tweet_id)
                         claims.append(c)
+                        new_day_claims.append(c)
+
+                _persist_claims(new_day_claims)
 
                 logger.info(
                     f"Day {day_count} ({day_start.strftime('%Y-%m-%d')}): "
@@ -383,6 +505,7 @@ async def run_collection(
                 since=since,
                 until=until,
             )
+            _persist_claims(claims)
 
         status.scraped = len(claims)
         status.scrape_tweets_found = len(claims)
@@ -392,42 +515,29 @@ async def run_collection(
         _update_status(status, name)
         logger.info(f"Scraped {len(claims)} raw claims")
 
-        # 2. Filter immature tweets
+        # 3. Filter immature tweets
         claims = _filter_mature_claims(claims)
 
-        # 3. Connect DB and skip already-stored tweets
-        db = None
-        if database_url:
-            db = SentinelDB(database_url)
-            db.connect()
-            db.init_schema()
-
+        # 4. Skip already-enriched tweets
         if db:
             all_ids = [c.tweet_id for c in claims]
             existing = db.get_existing_tweet_ids(all_ids)
             if existing:
                 claims = [c for c in claims if c.tweet_id not in existing]
                 logger.info(
-                    f"Skipped {len(existing)} already-scraped tweets, "
+                    f"Skipped {len(existing)} already-enriched tweets, "
                     f"{len(claims)} new tweets to enrich"
                 )
 
         status.scraped = len(claims)
 
-        # 4. Classify accounts and filter bots
+        # 5. Classify accounts (enrich everything, training filters to humans)
         if db:
-            bot_usernames = _classify_new_accounts(claims, db, status, name)
-            if bot_usernames:
-                pre_filter = len(claims)
-                claims = [c for c in claims if c.username not in bot_usernames]
-                logger.info(
-                    f"Filtered {pre_filter - len(claims)} bot tweets, "
-                    f"{len(claims)} human tweets to enrich"
-                )
-                status.scraped = len(claims)
+            _classify_new_accounts(claims, db, status, name)
 
-        # 5. Enrich + label
-        await _enrich_and_label(claims, db, status, name, is_shutdown)
+        # 6. Enrich + label
+        await _enrich_and_label(claims, db, status, name, is_shutdown, labeler="naive")
+        await _enrich_and_label(claims, db, status, name, is_shutdown, labeler="improved")
 
         if db:
             db.close()
@@ -460,11 +570,16 @@ async def run_enrichment(
     since: datetime | None = None,
     until: datetime | None = None,
     unlabeled_only: bool = False,
+    rejudge: bool = False,
+    labeler: str = "naive",
 ) -> None:
     """Re-enrich existing raw claims without scraping.
 
     Reads claims from the database, fetches fresh price/news data,
     re-labels, and updates the database.
+
+    Args:
+        labeler: "naive" or "improved" — which labeling system to use.
     """
     from .data.db import SentinelDB
 
@@ -491,7 +606,7 @@ async def run_enrichment(
 
         claims = db.get_raw_claims(
             tickers=tickers, since=since, until=until,
-            unlabeled_only=unlabeled_only,
+            unlabeled_only=unlabeled_only, labels=labeler,
         )
 
         if not claims:
@@ -506,21 +621,16 @@ async def run_enrichment(
 
         claims = _filter_mature_claims(claims)
 
-        # Classify accounts and filter bots
-        bot_usernames = _classify_new_accounts(claims, db, status, name)
-        if bot_usernames:
-            pre_filter = len(claims)
-            claims = [c for c in claims if c.username not in bot_usernames]
-            logger.info(
-                f"Filtered {pre_filter - len(claims)} bot tweets, "
-                f"{len(claims)} human tweets to enrich"
-            )
+        # Classify accounts (but don't filter — enrich everything,
+        # training data loader handles human-only filtering)
+        _classify_new_accounts(claims, db, status, name, rejudge=rejudge)
 
         status.scraped = len(claims)
+        status.phase = "enriching"
         _update_status(status, name)
-        logger.info(f"Enriching {len(claims)} claims")
+        logger.info(f"Enriching {len(claims)} claims with {labeler} labeler")
 
-        await _enrich_and_label(claims, db, status, name, is_shutdown)
+        await _enrich_and_label(claims, db, status, name, is_shutdown, labeler=labeler)
 
         db.close()
 

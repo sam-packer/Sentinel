@@ -18,7 +18,7 @@ jobs=0
 # R0915: Too many statements
 # W0511: TODO/FIXME markers
 # W1514: Using open without encoding (standard on modern Python 3, though 'utf-8' is better)
-disable=C0111, R0903, C0103, W1203, W0718, R0917, R0914, W1201, C0415, W0613, R0912, R0915, W0511, W1514, R0801, R1705, R1702
+disable=C0111, R0903, C0103, W1203, W0718, R0917, R0914, W1201, C0415, W0613, R0912, R0915, W0511, W1514, R0801, R1705, R1702, R1732
 
 [FORMAT]
 # Modern screens are wide. 120 is standard, but 160 is fine for complex logic lines.
@@ -32,7 +32,8 @@ good-names=i,j,k,ex,Run,_,fp,id,db,df,f
 max-args=10
 max-attributes=25
 max-public-methods=25
+max-returns=10
 
 [TYPECHECK]
 # psycopg3 uses C extensions (psycopg_c) that pylint cannot introspect
-generated-members=cursor,commit,close,closed,description
+generated-members=cursor,commit,close,closed,description,transaction

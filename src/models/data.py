@@ -34,27 +34,43 @@ class TrainTestSplit:
         return len(self.test_texts)
 
 
-def load_labeled_claims(db: SentinelDB) -> list[dict]:
+VALID_LABEL_TABLES = ("naive_labeled_claims", "improved_labeled_claims")
+
+
+def load_labeled_claims(
+    db: SentinelDB,
+    label_table: str = "naive_labeled_claims",
+) -> list[dict]:
     """Load all labeled claims from the database.
 
+    Args:
+        db: Database connection.
+        label_table: Which label table to read from
+            ("naive_labeled_claims" or "improved_labeled_claims").
+
     Returns a list of dicts with 'text' and 'label' keys (plus all
-    other fields from the joined raw_claims/labeled_claims tables).
+    other fields from the joined raw_claims table).
     """
-    query = """
+    if label_table not in VALID_LABEL_TABLES:
+        raise ValueError(f"Invalid label_table: {label_table}")
+
+    query = f"""
         SELECT r.tweet_id, r.text, r.username, r.created_at,
                r.ticker, r.company_name, r.price_change_pct,
                r.has_catalyst, r.catalyst_type,
                l.label, l.claimed_direction, l.actual_direction,
                l.exaggeration_score
-        FROM labeled_claims l
+        FROM {label_table} l
         JOIN raw_claims r ON r.tweet_id = l.tweet_id
         LEFT JOIN accounts a ON r.username = a.username
-        WHERE a.account_type IS NULL OR a.account_type = 'human'
+        WHERE (a.account_type IS NULL OR a.account_type = 'human')
+          AND r.created_at >= r.scraped_at - INTERVAL '90 days'
+          AND r.price_change_pct IS NOT NULL
         ORDER BY r.created_at
     """
     columns, rows = db.execute_query(query)
 
-    logger.info(f"Loaded {len(rows)} labeled claims (bot accounts excluded)")
+    logger.info(f"Loaded {len(rows)} claims from {label_table} (bot accounts excluded)")
 
     return [dict(zip(columns, row)) for row in rows]
 

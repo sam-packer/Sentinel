@@ -13,11 +13,16 @@ class TestAccount:
         assert account.username == "testuser"
         assert account.account_type == "human"
         assert account.classification_reason is None
-        assert account.total_claims == 0
-        assert account.exaggerated_count == 0
-        assert account.accurate_count == 0
-        assert account.understated_count == 0
-        assert account.grifter_score is None
+        assert account.naive_total_claims == 0
+        assert account.naive_exaggerated_count == 0
+        assert account.naive_accurate_count == 0
+        assert account.naive_understated_count == 0
+        assert account.naive_grifter_score is None
+        assert account.improved_total_claims == 0
+        assert account.improved_exaggerated_count == 0
+        assert account.improved_accurate_count == 0
+        assert account.improved_understated_count == 0
+        assert account.improved_grifter_score is None
         assert account.first_seen is None
         assert account.last_seen is None
         assert account.classified_at is None
@@ -45,19 +50,19 @@ class TestAccount:
     def test_scored_account(self):
         account = Account(
             username="grifter",
-            total_claims=10,
-            exaggerated_count=8,
-            accurate_count=2,
-            grifter_score=0.8,
+            naive_total_claims=10,
+            naive_exaggerated_count=8,
+            naive_accurate_count=2,
+            naive_grifter_score=0.8,
         )
-        assert account.grifter_score == 0.8
+        assert account.naive_grifter_score == 0.8
 
     def test_grifter_score_none_below_threshold(self):
         """Accounts with < 5 claims should have None grifter_score."""
         account = Account(
             username="newuser",
-            total_claims=3,
-            exaggerated_count=2,
-            accurate_count=1,
+            naive_total_claims=3,
+            naive_exaggerated_count=2,
+            naive_accurate_count=1,
         )
-        assert account.grifter_score is None
+        assert account.naive_grifter_score is None

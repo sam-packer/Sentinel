@@ -18,8 +18,12 @@ MODEL_REGISTRY = {
 MODEL_DIR = Path("models")
 
 
-def load_model(name: str) -> "BaseModel":
+def load_model(name: str, labels: str = "naive") -> "BaseModel":
     """Import, instantiate, and load a trained model by name.
+
+    Args:
+        name: Model name from MODEL_REGISTRY.
+        labels: Label set subdirectory ("naive" or "improved").
 
     Raises FileNotFoundError if no saved model exists.
     Raises KeyError if the model name is not in the registry.
@@ -33,11 +37,17 @@ def load_model(name: str) -> "BaseModel":
     cls = getattr(module, class_name)
     instance = cls()
 
-    model_dir = MODEL_DIR / instance.name
+    model_dir = MODEL_DIR / instance.name / f"{labels}_labeler"
     if not model_dir.exists():
-        raise FileNotFoundError(
-            f"No trained model at {model_dir}/. Run 'uv run train {name}' first."
-        )
+        # Fallback: check old flat path for backward compatibility
+        flat_dir = MODEL_DIR / instance.name
+        if flat_dir.exists():
+            model_dir = flat_dir
+        else:
+            raise FileNotFoundError(
+                f"No trained model at {model_dir}/ or {flat_dir}/. "
+                f"Run 'uv run train {name}' first."
+            )
 
     instance.load(model_dir)
     return instance

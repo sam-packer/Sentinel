@@ -13,6 +13,10 @@ Endpoints:
   GET  /api/accounts/<username>  — Account detail + claim history
   GET  /api/leaderboard          — Top grifters / best signal accounts
   GET  /api/health               — Health check
+
+Common query parameters:
+  labels — Choose labeling method: "naive" (default) or "improved".
+           Controls which label set is used for claims, stats, and leaderboards.
 """
 
 import asyncio
@@ -20,12 +24,14 @@ import json
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
 from ..data.db import SentinelDB
-from ..data.stocks import DEFENSE_STOCKS, TICKER_NAMES
+from ..data.models import RawClaim
+from ..data.stocks import DEFENSE_STOCKS, TICKER_NAMES, resolve_ticker
+from .limiter import limiter
 
 logger = logging.getLogger("sentinel.api.routes")
 
@@ -38,16 +44,34 @@ def _serialize_account(account) -> dict:
         "username": account.username,
         "is_bot": account.account_type != "human",
         "bot_reason": account.classification_reason,
-        "total_claims": account.total_claims,
-        "exaggerated_count": account.exaggerated_count,
-        "accurate_count": account.accurate_count,
-        "understated_count": account.understated_count,
-        "grifter_score": account.grifter_score,
-        "grifter_category": _grifter_category(account.grifter_score),
+        "naive": {
+            "total_claims": account.naive_total_claims,
+            "exaggerated_count": account.naive_exaggerated_count,
+            "accurate_count": account.naive_accurate_count,
+            "understated_count": account.naive_understated_count,
+            "grifter_score": account.naive_grifter_score,
+            "grifter_category": _grifter_category(account.naive_grifter_score),
+        },
+        "improved": {
+            "total_claims": account.improved_total_claims,
+            "exaggerated_count": account.improved_exaggerated_count,
+            "accurate_count": account.improved_accurate_count,
+            "understated_count": account.improved_understated_count,
+            "grifter_score": account.improved_grifter_score,
+            "grifter_category": _grifter_category(account.improved_grifter_score),
+        },
         "first_seen": account.first_seen.isoformat() if account.first_seen else None,
         "last_seen": account.last_seen.isoformat() if account.last_seen else None,
         "classified_at": account.classified_at.isoformat() if account.classified_at else None,
     }
+
+
+def _parse_labels_param() -> str:
+    """Parse and validate the 'labels' query parameter."""
+    labels = request.args.get("labels", "naive")
+    if labels not in ("naive", "improved"):
+        return None
+    return labels
 
 
 def _grifter_category(score) -> str:
@@ -76,10 +100,11 @@ def _parse_tweet_id(url: str) -> int | None:
     return None
 
 
-def _fetch_tweet(tweet_id: int) -> tuple[str, str]:
-    """Fetch tweet text and username by ID using twscrape.
+def _fetch_tweet(tweet_id: int) -> dict:
+    """Fetch tweet data by ID using twscrape.
 
-    Returns (text, username).
+    Returns a dict with text, username, created_at, likes, retweets, replies,
+    views, and hashtags.
     Raises Exception if the tweet cannot be fetched.
     """
     from ..config import config as app_config
@@ -90,7 +115,16 @@ def _fetch_tweet(tweet_id: int) -> tuple[str, str]:
         tweet = await api.tweet_details(tweet_id)
         if tweet is None:
             raise ValueError(f"Tweet {tweet_id} not found")
-        return tweet.rawContent, tweet.user.username
+        return {
+            "text": tweet.rawContent,
+            "username": tweet.user.username,
+            "created_at": tweet.date if tweet.date else datetime.now(timezone.utc),
+            "likes": tweet.likeCount or 0,
+            "retweets": tweet.retweetCount or 0,
+            "replies": tweet.replyCount or 0,
+            "views": tweet.viewCount,
+            "hashtags": [ht.tag for ht in (tweet.hashtags or [])],
+        }
 
     return asyncio.run(_fetch())
 
@@ -151,10 +185,14 @@ def feed():
     if label_filter and label_filter not in ("exaggerated", "accurate", "understated"):
         return jsonify({"error": "Invalid label filter"}), 400
 
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
         db = _get_db()
-        claims = db.get_feed(limit=limit, offset=offset, label=label_filter)
-        return jsonify({"claims": claims, "count": len(claims)})
+        claims = db.get_feed(limit=limit, offset=offset, label=label_filter, labels=labels)
+        return jsonify({"claims": claims, "count": len(claims), "labels": labels})
     except Exception as e:
         logger.error(f"Feed query failed: {e}")
         return jsonify({"error": "Database error"}), 500
@@ -168,13 +206,17 @@ def feed_stream():
     Emits new LabeledClaim as JSON whenever the scraper pipeline
     inserts a new row.
     """
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     def generate():
         db = _get_db()
-        last_id = db.get_latest_claim_id()
+        last_id = db.get_latest_claim_id(labels=labels)
 
         while True:
             try:
-                new_claims = db.get_claims_since(last_id) if last_id else []
+                new_claims = db.get_claims_since(last_id, labels=labels) if last_id else []
 
                 for claim in new_claims:
                     yield f"data: {json.dumps(claim)}\n\n"
@@ -204,9 +246,13 @@ def feed_stream():
 @api_bp.route("/stats", methods=["GET"])
 def stats():
     """Aggregate statistics about labeled claims."""
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
         db = _get_db()
-        return jsonify(db.get_stats())
+        return jsonify({**db.get_stats(labels=labels), "labels": labels})
     except Exception as e:
         logger.error(f"Stats query failed: {e}")
         return jsonify({"error": "Database error"}), 500
@@ -217,15 +263,20 @@ def accounts():
     """List accounts with credibility scores.
 
     Query params:
-      sort_by    — field to sort by (default "grifter_score")
+      sort_by    — field to sort by (default "naive_grifter_score")
       order      — "asc" or "desc" (default "desc")
       min_claims — minimum claims to include (default 5)
       account_type — optional filter: human, bot, garbage
       limit      — max results (default 50)
       offset     — pagination offset (default 0)
     """
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
-        sort_by = request.args.get("sort_by", "grifter_score")
+        default_sort = "improved_grifter_score" if labels == "improved" else "naive_grifter_score"
+        sort_by = request.args.get("sort_by", default_sort)
         order = request.args.get("order", "desc")
         min_claims = int(request.args.get("min_claims", 5))
         limit = min(int(request.args.get("limit", 50)), 200)
@@ -249,10 +300,12 @@ def accounts():
             account_type=account_type,
             limit=limit,
             offset=offset,
+            labels=labels,
         )
         return jsonify({
             "accounts": [_serialize_account(a) for a in account_list],
             "count": len(account_list),
+            "labels": labels,
         })
     except Exception as e:
         logger.error(f"Accounts query failed: {e}")
@@ -265,6 +318,10 @@ def account_detail(username):
 
     Returns account info plus their labeled claims.
     """
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
         db = _get_db()
         account = db.get_account(username)
@@ -276,9 +333,10 @@ def account_detail(username):
         return jsonify({"error": f"Account '{username}' not found"}), 404
 
     try:
-        claims = db.get_account_claims(username, limit=200, offset=0)
+        claims = db.get_account_claims(username, limit=200, offset=0, labels=labels)
         account_data = _serialize_account(account)
         account_data["claims"] = claims
+        account_data["labels"] = labels
         return jsonify(account_data)
     except Exception as e:
         logger.error(f"Account claims query failed: {e}")
@@ -306,6 +364,10 @@ def stock_feed(ticker):
 
     exclude_bots = request.args.get("exclude_bots", "true").lower() in ("true", "1", "yes")
 
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
         db = _get_db()
         claims = db.get_stock_feed(
@@ -313,11 +375,13 @@ def stock_feed(ticker):
             limit=limit,
             offset=offset,
             exclude_bots=exclude_bots,
+            labels=labels,
         )
         return jsonify({
             "claims": claims,
             "count": len(claims),
             "ticker": ticker,
+            "labels": labels,
         })
     except Exception as e:
         logger.error(f"Stock feed query failed: {e}")
@@ -331,12 +395,17 @@ def stock_stats(ticker):
     if ticker not in TICKER_NAMES:
         return jsonify({"error": f"Unknown ticker '{ticker}'"}), 404
 
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
         db = _get_db()
-        stock_data = db.get_stock_stats(ticker)
+        stock_data = db.get_stock_stats(ticker, labels=labels)
         return jsonify({
             "ticker": ticker,
             "company_name": TICKER_NAMES[ticker],
+            "labels": labels,
             **stock_data,
         })
     except Exception as e:
@@ -356,6 +425,10 @@ def leaderboard():
     if category not in ("grifters", "signal"):
         return jsonify({"error": "Invalid category, must be 'grifters' or 'signal'"}), 400
 
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
         limit = min(int(request.args.get("limit", 20)), 100)
     except (ValueError, TypeError):
@@ -363,10 +436,11 @@ def leaderboard():
 
     try:
         db = _get_db()
-        account_list = db.get_leaderboard(category=category, limit=limit)
+        account_list = db.get_leaderboard(category=category, limit=limit, labels=labels)
         return jsonify({
             "category": category,
-            "accounts": account_list,
+            "accounts": [_serialize_account(a) for a in account_list],
+            "labels": labels,
         })
     except Exception as e:
         logger.error(f"Leaderboard query failed: {e}")
@@ -374,10 +448,14 @@ def leaderboard():
 
 
 @api_bp.route("/predict", methods=["POST"])
+@limiter.limit("10/5minutes")
 def predict():
     """Predict a label for a tweet by URL.
 
-    Body: { "url": str, "model": str? }
+    Body: { "url": str, "model": str?, "labels": str? }
+    - model: Model key like "classical/naive", "neural/improved", or legacy "classical".
+    - labels: "naive" or "improved" (default "naive"). Used to select model when
+      only a base model name is given (e.g. "classical" → "classical/naive").
     Returns: { "label": str, "confidence": float, "model": str,
                "available_models": list, "account": dict | null }
     """
@@ -390,12 +468,38 @@ def predict():
     if tweet_id is None:
         return jsonify({"error": "Invalid tweet URL. Expected: https://x.com/user/status/123456"}), 400
 
-    # Fetch tweet text via twscrape
+    # Fetch tweet data via twscrape
     try:
-        tweet_text, tweet_username = _fetch_tweet(tweet_id)
+        tweet_data = _fetch_tweet(tweet_id)
     except Exception as e:
         logger.error(f"Failed to fetch tweet {tweet_id}: {e}")
         return jsonify({"error": f"Could not fetch tweet: {e}"}), 502
+
+    tweet_text = tweet_data["text"]
+    tweet_username = tweet_data["username"]
+
+    # Store as raw claim if a defense ticker is mentioned
+    ticker = resolve_ticker(tweet_text)
+    if ticker:
+        try:
+            db = _get_db()
+            raw_claim = RawClaim(
+                tweet_id=tweet_id,
+                text=tweet_text,
+                username=tweet_username,
+                created_at=tweet_data["created_at"],
+                likes=tweet_data["likes"],
+                retweets=tweet_data["retweets"],
+                replies=tweet_data["replies"],
+                views=tweet_data["views"],
+                hashtags=tweet_data["hashtags"],
+                ticker=ticker,
+                company_name=TICKER_NAMES.get(ticker, ticker),
+            )
+            db.insert_raw_claim(raw_claim)
+            logger.info(f"Stored raw claim for tweet {tweet_id} ({ticker})")
+        except Exception as e:
+            logger.warning(f"Failed to store raw claim for tweet {tweet_id}: {e}")
 
     # Select model
     models = current_app.config.get("MODELS", {})
@@ -403,9 +507,13 @@ def predict():
         return jsonify({"error": "No trained models available. Run 'uv run train <model>' first."}), 503
 
     model_name = data.get("model")
+    labels = data.get("labels", "naive")
     available = list(models.keys())
 
     if model_name:
+        # If a bare model name is given (e.g. "classical"), try "{name}/{labels}" first
+        if model_name not in models and "/" not in model_name:
+            model_name = f"{model_name}/{labels}"
         if model_name not in models:
             return jsonify({
                 "error": f"Model '{model_name}' not available",
@@ -427,9 +535,16 @@ def predict():
             if account:
                 account_info = {
                     "username": account.username,
-                    "grifter_score": account.grifter_score,
-                    "grifter_category": _grifter_category(account.grifter_score),
-                    "total_claims": account.total_claims,
+                    "naive": {
+                        "grifter_score": account.naive_grifter_score,
+                        "grifter_category": _grifter_category(account.naive_grifter_score),
+                        "total_claims": account.naive_total_claims,
+                    },
+                    "improved": {
+                        "grifter_score": account.improved_grifter_score,
+                        "grifter_category": _grifter_category(account.improved_grifter_score),
+                        "total_claims": account.improved_total_claims,
+                    },
                 }
         except Exception as e:
             logger.error(f"Account lookup in predict failed: {e}")

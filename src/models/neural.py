@@ -10,6 +10,8 @@ and macro F1 as the objective — same evaluation framework as the
 classical model for fair comparison.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -17,13 +19,18 @@ from pathlib import Path
 
 import numpy as np
 import optuna
-import torch
-import transformers
+try:
+    import torch
+    import transformers
+    from torch import nn
+    from torch.utils.data import DataLoader, Dataset
+    from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
+except ImportError as exc:
+    raise ImportError(
+        "PyTorch and transformers are required for the neural model"
+    ) from exc
 from sklearn.metrics import f1_score
 from sklearn.model_selection import StratifiedKFold
-from torch import nn
-from torch.utils.data import DataLoader, Dataset
-from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 
 from . import BaseModel
 

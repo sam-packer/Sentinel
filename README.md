@@ -48,6 +48,7 @@ Before enriching tweets, Sentinel classifies each account as human or bot using 
 automatically during collection — each account is classified once and the result is cached in the `accounts` table.
 
 The classifier receives the account's username and up to 5 sample tweets, then categorizes it as one of:
+
 - **human** — real person sharing opinions or analysis
 - **news_ticker** — automated account reposting headlines verbatim
 - **repost_bot** — account that copies or auto-generates content
@@ -96,31 +97,18 @@ The priority ordering matters: a headline mentioning both a "Pentagon contract" 
 
 ### Stage 5: Label
 
-Compares what the tweet *claimed* against what *actually happened*. This is entirely rule-based, no ML models, just
-string matching and hardcoded thresholds.
+Two independent labelers run on the same enriched tweets, writing to separate tables. Both are rule-based (no ML in the
+labeling step). You choose which to run with `--naive` or `--improved`.
 
-The labeler first parses claimed direction from the tweet text. Bullish keywords (`moon`, `pump`, `surge`, `rally`,
-`bullish`, `calls`, `long`) and emoji (🚀📈💎🔥💰🐂) count toward "up." Bearish keywords (`crash`, `dump`, `plunge`,
-`short`, `puts`, `bearish`) and emoji (📉🔻💀🐻⚠️) count toward "down." If both signals are present, the result is
-"neutral."
+**Naive labeler** (`src/data/labeler.py` → `naive_labeled_claims`): keyword/emoji matching for claimed direction, fixed
+2% exaggeration threshold for all tickers. Simple and interpretable but can't handle negation, sarcasm, or non-claims.
 
-Then it determines actual direction from the 24h price change: above +0.5% is up, below -0.5% is down, otherwise
-neutral.
+**Improved labeler** (`src/data/improved_labeler.py` → `improved_labeled_claims`): adds negation detection (
+proximity-based), sarcasm markers, non-claim filtering (job posts, questions, long-term theses, position disclosures,
+past-tense recaps, informational content), and per-ticker volatility thresholds calibrated from historical data.
 
-It also scores tweet intensity from 0 to 1, based on exclamation marks, ALL CAPS words, emoji density, and superlatives
-like "insane" or "massive". This feeds into the exaggeration score but is not stored separately.
-
-The label is assigned by these rules:
-
-| Condition                                          | Label       |
-|----------------------------------------------------|-------------|
-| Claimed direction opposite of actual               | exaggerated |
-| Directional claim but price moved less than 2%     | exaggerated |
-| Directional claim, no news catalyst, move under 4% | exaggerated |
-| Direction matches, move at least 2%                | accurate    |
-| Neutral tweet, price moved less than 2%            | accurate    |
-| Neutral tweet, price moved 5% or more              | understated |
-| Price moved 10%+ but tweet intensity below 0.3     | understated |
+Both labelers parse claimed direction from keywords/emoji, compare against the actual 24h price change, and assign one
+of three labels: **exaggerated**, **accurate**, or **understated**.
 
 ### Exaggeration score
 
@@ -192,15 +180,15 @@ Labeling fields:
 
 Account fields (stored in `accounts` table):
 
-| Field              | Description                                                                |
-|--------------------|----------------------------------------------------------------------------|
-| `username`         | Twitter handle. Primary key.                                               |
-| `is_bot`           | Whether the account is a bot (classified by LLM-as-judge).                 |
-| `bot_reason`       | Why the account was classified as bot/human. Includes type and explanation. |
-| `total_claims`     | Total labeled claims from this account.                                    |
-| `exaggerated_count`| How many claims were labeled exaggerated.                                  |
-| `accurate_count`   | How many claims were labeled accurate.                                     |
-| `grifter_score`    | Ratio of exaggerated to total claims. Null if fewer than 5 claims.         |
+| Field               | Description                                                                 |
+|---------------------|-----------------------------------------------------------------------------|
+| `username`          | Twitter handle. Primary key.                                                |
+| `is_bot`            | Whether the account is a bot (classified by LLM-as-judge).                  |
+| `bot_reason`        | Why the account was classified as bot/human. Includes type and explanation. |
+| `total_claims`      | Total labeled claims from this account.                                     |
+| `exaggerated_count` | How many claims were labeled exaggerated.                                   |
+| `accurate_count`    | How many claims were labeled accurate.                                      |
+| `grifter_score`     | Ratio of exaggerated to total claims. Null if fewer than 5 claims.          |
 
 ## Commands
 
@@ -231,15 +219,15 @@ uv run collect --stop                       # stop background collection
 
 ### enrich
 
-Re-enriches existing raw claims with fresh price and news data. Useful after changing labeling thresholds or if
-earlier enrichment runs failed due to market closures.
+Re-enriches existing raw claims with fresh price and news data. Requires `--naive` or `--improved` to choose a labeler.
 
 ```bash
-uv run enrich                     # re-enrich all claims
-uv run enrich --days 7            # only claims from the last 7 days
-uv run enrich --unlabeled         # only claims missing labels
-uv run enrich --tickers LMT,RTX   # specific tickers only
-uv run enrich --background        # run in background
+uv run enrich --naive              # enrich with naive labeler → naive_labeled_claims
+uv run enrich --improved           # enrich with improved labeler → improved_labeled_claims
+uv run enrich --naive --days 7     # only claims from the last 7 days
+uv run enrich --naive --unlabeled  # only claims missing labels
+uv run enrich --naive --rejudge    # reclassify ALL accounts via LLM before enriching
+uv run enrich --naive --background # run in background
 uv run enrich --status             # check background progress
 uv run enrich --stop               # stop background enrichment
 ```
@@ -271,31 +259,56 @@ Trains a model on labeled claims from the database. Loads data, splits into trai
 saves the model to `models/<name>/`, and prints test set metrics.
 
 Available models:
-- `baseline` — Naive majority class predictor. Always predicts the most common label (~78% accuracy, 0% exaggeration recall). The floor any real model must beat.
-- `classical` — Optuna-tuned TF-IDF + logistic regression. 200 Optuna trials with stratified 3-fold CV optimizing macro F1. Saves model weights, TF-IDF vectorizer, and top predictive words for interpretability.
-- `neural` — Fine-tuned BERTweet (vinai/bertweet-base). 50 Optuna trials with stratified 3-fold CV optimizing macro F1. Tunes learning rate, weight decay, warmup, epochs, batch size, and dropout. Requires GPU.
+
+- `baseline` — Naive majority class predictor. Always predicts the most common label (~78% accuracy, 0% exaggeration
+  recall). The floor any real model must beat.
+- `classical` — Optuna-tuned TF-IDF + logistic regression. 200 Optuna trials with stratified 3-fold CV optimizing macro
+  F1. Saves model weights, TF-IDF vectorizer, and top predictive words for interpretability.
+- `neural` — Fine-tuned BERTweet (vinai/bertweet-base). 50 Optuna trials with stratified 3-fold CV optimizing macro F1.
+  Tunes learning rate, weight decay, warmup, epochs, batch size, and dropout. Requires GPU.
+
+Requires `--naive` or `--improved` to specify which label set to train on.
 
 ```bash
-uv run train baseline              # train the majority-class baseline
-uv run train classical             # train classical model (LR + XGBoost, ~200 Optuna trials each)
-uv run train classical --seed 99   # different random split
-uv run train classical --test-size 0.3  # 30% test set instead of 20%
+uv run train baseline --naive          # majority-class baseline on naive labels
+uv run train classical --naive --tune  # TF-IDF + LR on naive labels, run Optuna tuning
+uv run train classical --improved      # TF-IDF + LR on improved labels (reuse saved params)
+uv run train neural --naive --tune     # BERTweet on naive labels (requires GPU)
+uv run train neural --improved --tune  # BERTweet on improved labels (requires GPU)
 ```
 
-Model artifacts are saved to `models/<name>/`:
+Model artifacts are saved to `models/<name>/<naive|improved>/`:
 
 ```
 models/
 ├── baseline/
-│   └── model.json              # majority class + class counts
+│   ├── naive/
+│   │   ├── model.json          # majority class + class counts
+│   │   ├── report.md           # full markdown evaluation report
+│   │   ├── evaluation.json     # machine-readable metrics
+│   │   └── mispredictions.json # every test set error with full context
+│   └── improved/
+│       └── ...
 ├── classical/
-│   ├── lr.pkl                  # logistic regression weights
-│   ├── tfidf.pkl               # TF-IDF vectorizer (vocabulary + weights)
-│   └── model.json              # hyperparams, top predictive words
+│   ├── naive/
+│   │   ├── lr.pkl              # logistic regression weights
+│   │   ├── tfidf.pkl           # TF-IDF vectorizer
+│   │   ├── model.json          # hyperparams, top predictive words
+│   │   ├── report.md
+│   │   ├── evaluation.json
+│   │   └── mispredictions.json
+│   └── improved/
+│       └── ...
 └── neural/
-    ├── model/                  # BERTweet fine-tuned weights (safetensors)
-    ├── tokenizer/              # BERTweet tokenizer files
-    └── model.json              # hyperparams, training metadata
+    ├── naive/
+    │   ├── model/              # BERTweet fine-tuned weights
+    │   ├── tokenizer/          # BERTweet tokenizer files
+    │   ├── model.json
+    │   ├── report.md
+    │   ├── evaluation.json
+    │   └── mispredictions.json
+    └── improved/
+        └── ...
 ```
 
 ### evaluate
@@ -303,10 +316,12 @@ models/
 Evaluates a previously trained model on the test set. Uses the same seed and split as training so the test data
 matches. Reports accuracy, per-class precision/recall/F1, and confusion matrix.
 
+Requires `--naive` or `--improved` to match the label set used during training.
+
 ```bash
-uv run evaluate baseline           # evaluate saved baseline model
-uv run evaluate classical          # evaluate classical ensemble
-uv run evaluate classical --seed 99 # must match the seed used during training
+uv run evaluate baseline --naive       # evaluate baseline on naive test set
+uv run evaluate classical --improved   # evaluate classical on improved test set
+uv run evaluate neural --naive         # evaluate neural on naive test set
 ```
 
 ### predict
