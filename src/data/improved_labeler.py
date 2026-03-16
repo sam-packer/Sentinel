@@ -9,56 +9,82 @@ Addresses the top failure modes found in error analysis of the naive labeler
 - Position disclosure (22%): "added some $LDOS" no longer treated as a
   directional prediction.
 - Informational/analytical (15%): watchlists, sector analysis neutralized.
-- Volatile ticker threshold (14%): per-ticker thresholds replace the fixed 2%
-  cutoff (e.g., KTOS uses 2.15% to match its median daily move).
+- Volatile ticker threshold (14%): per-ticker thresholds computed dynamically
+  from yfinance data (median absolute daily move) replace the fixed 2% cutoff.
 - Past tense recap (11%): "ripped today" detected as backward-looking, not
   a forward prediction.
 - Sarcasm (4%): eye-roll emoji and sarcastic phrasing neutralize direction.
 - Questions (3%): "will $LMT moon?" treated as neutral, not bullish.
 - Negation (1%): "NOT going to moon" correctly flips direction.
 
-Reuses keyword lists, emoji sets, _intensity_score, _actual_direction, and
+Reuses keyword lists, emoji sets, _intensity_score, and
 compute_exaggeration_score from the naive labeler. Only parse_direction and
 label_claim are replaced.
 """
 
+import functools
 import logging
 import re
 from typing import Literal
+
+import numpy as np
+import yfinance as yf
 
 from .labeler import (
     _UP_SIGNALS,
     _UP_EMOJI,
     _DOWN_SIGNALS,
     _DOWN_EMOJI,
-    _actual_direction,
     _intensity_score,
     compute_exaggeration_score,
-    parse_direction,
 )
 from .models import RawClaim, LabeledClaim
 
 logger = logging.getLogger("sentinel.improved_labeler")
 
 # ---------------------------------------------------------------------------
-# Per-ticker volatility thresholds (median absolute daily move)
+# Per-ticker volatility thresholds (computed dynamically from yfinance)
 # ---------------------------------------------------------------------------
-TICKER_THRESHOLDS: dict[str, float] = {
-    "KTOS": 0.0215,
-    "BA": 0.0216,
-    "PLTR": 0.0176,
-    "BAH": 0.0137,
-    "SAIC": 0.0136,
-    "HII": 0.0170,
-    "RKLB": 0.0132,
-    "LDOS": 0.0066,
-    "LMT": 0.0123,
-    "NOC": 0.0077,
-    "RTX": 0.0060,
-    "LHX": 0.0068,
-    "GD": 0.0085,
-}
 DEFAULT_THRESHOLD: float = 0.02
+
+
+@functools.lru_cache(maxsize=32)
+def _get_ticker_threshold(ticker: str, lookback_days: int = 90) -> float:
+    """Compute median absolute daily percentage move for a ticker.
+
+    Uses the last `lookback_days` of daily close prices from yfinance.
+    Falls back to DEFAULT_THRESHOLD (2%) if data is unavailable.
+    Result is cached for the process lifetime.
+    """
+    try:
+        hist = yf.Ticker(ticker).history(period=f"{lookback_days}d")
+        if hist.empty or len(hist) < 10:
+            logger.warning("Insufficient price history for %s, using default threshold", ticker)
+            return DEFAULT_THRESHOLD
+        daily_returns = hist["Close"].pct_change().dropna()
+        median_move = float(np.median(np.abs(daily_returns)))
+        logger.debug("Computed threshold for %s: %.4f (from %d days)", ticker, median_move, len(daily_returns))
+        return median_move
+    except Exception as e:
+        logger.warning("Failed to compute threshold for %s: %s, using default", ticker, e)
+        return DEFAULT_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# Per-ticker actual direction
+# ---------------------------------------------------------------------------
+
+def _actual_direction_for_ticker(price_change_pct: float | None, ticker: str) -> Literal["up", "down", "neutral"]:
+    """Determine actual direction using per-ticker threshold."""
+    if price_change_pct is None:
+        return "neutral"
+    threshold = _get_ticker_threshold(ticker) * 100  # convert to percentage
+    if price_change_pct > threshold:
+        return "up"
+    if price_change_pct < -threshold:
+        return "down"
+    return "neutral"
+
 
 # ---------------------------------------------------------------------------
 # Pre-classification pattern sets
@@ -85,8 +111,6 @@ _PAST_TENSE_DIRECTIONAL = {
     "pumped", "tanked", "soared",
 }
 
-_PAST_TENSE_CONTEXT = {"today", "yesterday", "this week", "recap"}
-
 _QUESTION_PATTERNS = re.compile(
     r"(^|\s)(will|should|would)\s.+\?", re.IGNORECASE,
 )
@@ -100,13 +124,16 @@ _SARCASM_EMOJI = {"🙄"}
 
 _SARCASM_PATTERNS = re.compile(
     r"(/s\b|^sure,?\s|yeah\s+sure|totally\s+(moon|crash|dump|rip|surg|bull|bear)"
-    r"|definitely\s+(moon|crash|dump|rip|surg|bull|bear|insane|massive|huge))",
+    r"|definitely\s+(moon|crash|dump|rip|surg|bull|bear|insane|massive|huge)"
+    r"|oh\s+yeah|lmao\s+right|right\s*,?\s*(moon|crash|rip|bull|bear)"
+    r"|as\s+if|yeah\s+right)",
     re.IGNORECASE,
 )
 
 _NEGATION_WORDS = {
     "not", "n't", "no", "never", "unlikely", "doubt",
     "don't", "doesn't", "won't", "wouldn't", "isn't", "aren't",
+    "cant", "wont", "dont", "doesnt", "isnt", "arent",
 }
 
 
@@ -132,10 +159,8 @@ def _is_informational(lowered: str) -> bool:
 
 
 def _is_past_tense_recap(lowered: str) -> bool:
-    """Detect backward-looking recaps ('ripped today')."""
-    has_past = any(kw in lowered for kw in _PAST_TENSE_DIRECTIONAL)
-    has_context = any(kw in lowered for kw in _PAST_TENSE_CONTEXT)
-    return has_past and has_context
+    """Detect backward-looking recaps ('ripped', 'crashed today')."""
+    return any(kw in lowered for kw in _PAST_TENSE_DIRECTIONAL)
 
 
 def _is_question(text: str) -> bool:
@@ -161,10 +186,18 @@ def _classify_non_predictive(text: str) -> str | None:
     """Return a reason string if the tweet is non-predictive, else None."""
     lowered = text.lower()
 
+    # Priority order matters: earlier checks take precedence.
+    # 1. Non-claims (jobs, press releases) — strongest signal, always correct
+    # 2. Sarcasm — must come before questions so "will $X moon? 🙄" is sarcasm
+    # 3. Questions — "will $LMT moon?" without sarcasm markers
+    # 4. Long-term thesis — "believer in $RKLB longterm"
+    # 5. Position disclosure — "added some $LDOS"
+    # 6. Informational — watchlists, sector analysis
+    # 7. Past tense recap — "ripped today" (weakest signal, most false positives)
     checks = [
         (_is_non_claim(lowered), "non-claim (job/press)"),
-        (_is_question(text), "question"),
         (_is_sarcastic(text), "sarcasm"),
+        (_is_question(text), "question"),
         (_is_long_term_thesis(lowered), "long-term thesis"),
         (_is_position_disclosure(text), "position disclosure"),
         (_is_informational(lowered), "informational/analytical"),
@@ -183,28 +216,37 @@ def _classify_non_predictive(text: str) -> str | None:
 def _find_keyword_positions(lowered: str, words: list[str], keywords: set[str]) -> list[int]:
     """Find word indices where a keyword starts.
 
-    Handles multi-word keywords by checking substrings starting at each
-    word position.
+    Handles multi-word keywords. Longer keywords take priority over
+    shorter ones at the same position to avoid double-counting.
     """
     positions = []
-    for i, _ in enumerate(words):
-        for kw in keywords:
-            kw_words = kw.split()
-            if i + len(kw_words) <= len(words):
-                candidate = " ".join(words[i:i + len(kw_words)])
-                if candidate == kw:
-                    positions.append(i)
+    matched_indices: set[int] = set()
+    # Check longer keywords first so they take priority
+    sorted_keywords = sorted(keywords, key=lambda k: len(k.split()), reverse=True)
+    for kw in sorted_keywords:
+        kw_words = kw.split()
+        kw_len = len(kw_words)
+        for i in range(len(words) - kw_len + 1):
+            if i in matched_indices:
+                continue
+            candidate = " ".join(words[i:i + kw_len])
+            if candidate == kw:
+                positions.append(i)
+                for j in range(i, i + kw_len):
+                    matched_indices.add(j)
     return positions
 
 
 def _has_negation_nearby(words: list[str], keyword_idx: int, window: int = 5) -> bool:
-    """Check if a negation word appears within `window` words before keyword_idx."""
+    """Check if a negation word appears within `window` words of keyword_idx."""
     start = max(0, keyword_idx - window)
-    for i in range(start, keyword_idx):
-        word = words[i].strip(".,!?;:'\"")
+    end = min(len(words), keyword_idx + window + 1)
+    for i in range(start, end):
+        if i == keyword_idx:
+            continue
+        word = words[i].strip(".,!?;:'\"").lower()
         if word in _NEGATION_WORDS:
             return True
-        # Check for contractions like "isn't", "won't" etc.
         if "'t" in words[i] or "\u2019t" in words[i]:
             return True
     return False
@@ -286,24 +328,15 @@ def label_claim_improved(raw: RawClaim) -> LabeledClaim:
     Same return type as the naive labeler for compatibility.
     Writes to the improved_labeled_claims table.
     """
-    claimed, reason = parse_direction_improved(raw.text)
-    actual = _actual_direction(raw.price_change_pct)
+    claimed, _reason = parse_direction_improved(raw.text)
+    actual = _actual_direction_for_ticker(raw.price_change_pct, raw.ticker)
     intensity = _intensity_score(raw.text)
 
-    # Per-ticker threshold instead of fixed 2%
-    threshold = TICKER_THRESHOLDS.get(raw.ticker, DEFAULT_THRESHOLD)
+    # Per-ticker threshold computed dynamically from yfinance
+    threshold = _get_ticker_threshold(raw.ticker)
     threshold_pct = threshold * 100
 
     abs_move = abs(raw.price_change_pct) if raw.price_change_pct is not None else 0.0
-
-    # Compare with naive labeler for logging
-    naive_direction = parse_direction(raw.text)
-    if naive_direction != claimed:
-        logger.info(
-            "Improved labeler disagrees on direction for tweet %s: "
-            "naive=%s, improved=%s (reason: %s)",
-            raw.tweet_id, naive_direction, claimed, reason,
-        )
 
     # Default label
     label: Literal["exaggerated", "accurate", "understated"] = "accurate"
@@ -337,16 +370,6 @@ def label_claim_improved(raw: RawClaim) -> LabeledClaim:
     elif abs_move >= 10.0 and intensity < 0.3:
         label = "understated"
 
-    # Log when improved label differs from what naive would produce
-    # (direction differences already logged above; this catches threshold effects)
-    naive_label = _naive_label_for_comparison(raw, naive_direction, actual, intensity)
-    if naive_label != label:
-        logger.info(
-            "Improved labeler disagrees on label for tweet %s: "
-            "naive=%s, improved=%s (ticker=%s, threshold=%.4f, reason=%s)",
-            raw.tweet_id, naive_label, label, raw.ticker, threshold, reason,
-        )
-
     exaggeration_score = compute_exaggeration_score(
         claimed, actual, raw.price_change_pct, raw.has_catalyst, intensity,
         news_available=bool(raw.news_headlines),
@@ -362,40 +385,3 @@ def label_claim_improved(raw: RawClaim) -> LabeledClaim:
         exaggeration_score=round(exaggeration_score, 3),
         news_summary=news_summary,
     )
-
-
-def _naive_label_for_comparison(
-    raw: RawClaim,
-    claimed: Literal["up", "down", "neutral"],
-    actual: Literal["up", "down", "neutral"],
-    intensity: float,
-) -> Literal["exaggerated", "accurate", "understated"]:
-    """Reproduce the naive labeler's logic for comparison logging.
-
-    Uses the fixed 2% threshold to match the naive labeler's behavior.
-    """
-    threshold_pct = 2.0
-    abs_move = abs(raw.price_change_pct) if raw.price_change_pct is not None else 0.0
-
-    if raw.price_change_pct is None:
-        return "accurate" if claimed == "neutral" else "exaggerated"
-    if claimed == "neutral" and abs_move < threshold_pct:
-        return "accurate"
-    if claimed == "neutral" and abs_move >= 5.0:
-        return "understated"
-    if claimed != "neutral" and actual != "neutral" and claimed != actual:
-        return "exaggerated"
-    if claimed != "neutral" and abs_move < threshold_pct:
-        return "exaggerated"
-    if (
-        claimed != "neutral"
-        and not raw.has_catalyst
-        and raw.news_headlines
-        and abs_move < threshold_pct * 2
-    ):
-        return "exaggerated"
-    if claimed != "neutral" and claimed == actual and abs_move >= threshold_pct:
-        return "accurate"
-    if abs_move >= 10.0 and intensity < 0.3:
-        return "understated"
-    return "accurate"

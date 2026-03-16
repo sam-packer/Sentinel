@@ -5,7 +5,8 @@ Defense stock claim analyzer. Scrapes tweets, fetches actual 24h price changes, 
 ## Critical Context
 
 - **Retrospective pipeline**, not real-time prediction. Labels require the 24h price window to have elapsed.
-- **Dual labeling**: naive (`naive_labeled_claims`) and improved (`improved_labeled_claims`) label sets from the same enriched tweets. Models train on each independently → `models/{name}/{naive|improved}/`.
+- **Dual labeling**: naive (`naive_labeled_claims`) and improved (`improved_labeled_claims`) label sets from the same enriched tweets. Both labelers always run together — enrichment fetches price/news once, then labels with both systems in one pass. Models train on each independently → `models/{name}/{naive|improved}_labeler/`.
+- **Enrichment defaults to both labelers**. `uv run enrich` runs both; `--naive` or `--improved` to run only one. `uv run collect` always runs both.
 - **Bot filtering**: LLM-as-judge (Claude Haiku) classifies accounts. Bot/garbage accounts are excluded from training data and grifter scoring.
 - **Freshness filter**: tweets created >90 days before scraping are excluded (compares `created_at` vs `scraped_at`, not current time).
 - **DB connections use `autocommit=True`** — write methods that need atomicity use explicit `conn.transaction()`.
