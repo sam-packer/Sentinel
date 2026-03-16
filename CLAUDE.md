@@ -6,7 +6,7 @@
 
 Sentinel scrapes tweets about defense stocks (LMT, RTX, NOC, etc.), fetches the actual 24h price change and news catalysts, then labels each claim using rule-based heuristics. The labeled data is stored in PostgreSQL and served through a Flask API.
 
-This is a **retrospective data collection pipeline**, not a real-time prediction system. Labeling requires the 24h price window to have elapsed. Tweets less than 25 hours old are skipped during enrichment.
+This is a **retrospective data collection pipeline**, not a real-time prediction system. Labeling requires the 24h price window to have elapsed. Tweets less than 25 hours old are skipped during enrichment. Stale tweets (created more than 90 days before scraping) are also excluded — Twitter search sometimes returns old results alongside current ones.
 
 ## Pipeline
 
@@ -37,6 +37,7 @@ uv run collect --status        # Check background collection progress
 uv run collect --stop          # Stop background collection
 uv run enrich                  # Re-enrich existing claims
 uv run enrich --days 7         # Re-enrich claims from last 7 days
+uv run enrich --rejudge        # Re-enrich and reclassify ALL accounts via LLM
 uv run enrich --status         # Check background enrichment progress
 uv run classify                # Classify unclassified accounts as human/bot
 uv run classify --limit 50     # Classify up to 50 accounts

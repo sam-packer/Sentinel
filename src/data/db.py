@@ -15,6 +15,11 @@ from .models import RawClaim, LabeledClaim, Account
 
 logger = logging.getLogger("sentinel.db")
 
+# Exclude stale tweets where the tweet was created more than 90 days
+# before it was scraped. These are old results Twitter search returns
+# alongside current ones. A tweet from 2019 scraped in 2026 is noise.
+FRESHNESS_FILTER = "r.created_at >= r.scraped_at - INTERVAL '90 days'"
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS raw_claims (
     tweet_id BIGINT PRIMARY KEY,
@@ -57,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_raw_claims_created_at ON raw_claims(created_at DE
 CREATE TABLE IF NOT EXISTS accounts (
     username VARCHAR(255) PRIMARY KEY,
     account_type VARCHAR(10) DEFAULT 'human',
-    classification_reason VARCHAR(255),
+    classification_reason TEXT,
     total_claims INTEGER DEFAULT 0,
     exaggerated_count INTEGER DEFAULT 0,
     accurate_count INTEGER DEFAULT 0,
@@ -84,7 +89,7 @@ class SentinelDB:
     def connect(self) -> None:
         """Open database connection."""
         if self._conn is None or self._conn.closed:
-            self._conn = psycopg.connect(self._url)
+            self._conn = psycopg.connect(self._url, autocommit=True)
             logger.info("Database connected")
 
     def close(self) -> None:
@@ -249,7 +254,7 @@ class SentinelDB:
     def insert_labeled_claim(self, labeled: LabeledClaim) -> None:
         """Insert a labeled claim (updates raw_claim fields too)."""
         conn = self._get_conn()
-        with conn.cursor() as cur:
+        with conn.transaction(), conn.cursor() as cur:
             # Upsert the raw claim data
             cur.execute(
                 """
@@ -307,7 +312,6 @@ class SentinelDB:
                     labeled.exaggeration_score, labeled.news_summary,
                 ),
             )
-        conn.commit()
         self.update_account_scores(labeled.username)
 
     def get_feed(
@@ -340,9 +344,11 @@ class SentinelDB:
             JOIN raw_claims r ON r.tweet_id = l.tweet_id
         """
         params: list = []
+        conditions = [FRESHNESS_FILTER]
         if label:
-            query += " WHERE l.label = %s"
+            conditions.append("l.label = %s")
             params.append(label)
+        query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY r.created_at DESC LIMIT %s OFFSET %s"
         params.extend([limit, offset])
 
@@ -374,59 +380,68 @@ class SentinelDB:
 
         with conn.cursor() as cur:
             # Total claims
-            cur.execute("SELECT COUNT(*) FROM labeled_claims")
+            cur.execute(f"""
+                SELECT COUNT(*) FROM raw_claims r
+                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                WHERE {FRESHNESS_FILTER}
+            """)
             stats["total_claims"] = cur.fetchone()[0]
 
             # Label distribution
-            cur.execute(
-                "SELECT label, COUNT(*) FROM labeled_claims GROUP BY label"
-            )
+            cur.execute(f"""
+                SELECT l.label, COUNT(*) FROM labeled_claims l
+                JOIN raw_claims r ON r.tweet_id = l.tweet_id
+                WHERE {FRESHNESS_FILTER}
+                GROUP BY l.label
+            """)
             stats["label_distribution"] = dict(cur.fetchall())
 
             # Catalyst type distribution
-            cur.execute(
-                """SELECT r.catalyst_type, COUNT(*)
-                   FROM raw_claims r
-                   JOIN labeled_claims l ON r.tweet_id = l.tweet_id
-                   WHERE r.catalyst_type IS NOT NULL
-                   GROUP BY r.catalyst_type"""
-            )
+            cur.execute(f"""
+                SELECT r.catalyst_type, COUNT(*)
+                FROM raw_claims r
+                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                WHERE r.catalyst_type IS NOT NULL AND {FRESHNESS_FILTER}
+                GROUP BY r.catalyst_type
+            """)
             stats["catalyst_type_distribution"] = dict(cur.fetchall())
 
             # Top tickers by claim count
-            cur.execute(
-                """SELECT r.ticker, COUNT(*) as cnt
-                   FROM raw_claims r
-                   JOIN labeled_claims l ON r.tweet_id = l.tweet_id
-                   GROUP BY r.ticker ORDER BY cnt DESC LIMIT 10"""
-            )
+            cur.execute(f"""
+                SELECT r.ticker, COUNT(*) as cnt
+                FROM raw_claims r
+                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                WHERE {FRESHNESS_FILTER}
+                GROUP BY r.ticker ORDER BY cnt DESC LIMIT 10
+            """)
             stats["top_tickers"] = [
                 {"ticker": row[0], "count": row[1]} for row in cur.fetchall()
             ]
 
             # Most exaggerated users
-            cur.execute(
-                """SELECT r.username, COUNT(*) as cnt
-                   FROM raw_claims r
-                   JOIN labeled_claims l ON r.tweet_id = l.tweet_id
-                   WHERE l.label = 'exaggerated'
-                   GROUP BY r.username ORDER BY cnt DESC LIMIT 10"""
-            )
+            cur.execute(f"""
+                SELECT r.username, COUNT(*) as cnt
+                FROM raw_claims r
+                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                WHERE l.label = 'exaggerated' AND {FRESHNESS_FILTER}
+                GROUP BY r.username ORDER BY cnt DESC LIMIT 10
+            """)
             stats["most_exaggerated_users"] = [
                 {"username": row[0], "count": row[1]} for row in cur.fetchall()
             ]
 
             # Accuracy by ticker
-            cur.execute(
-                """SELECT r.ticker,
-                          COUNT(*) as total,
-                          SUM(CASE WHEN l.label = 'accurate' THEN 1 ELSE 0 END) as accurate,
-                          SUM(CASE WHEN l.label = 'exaggerated' THEN 1 ELSE 0 END) as exaggerated,
-                          SUM(CASE WHEN l.label = 'understated' THEN 1 ELSE 0 END) as understated
-                   FROM raw_claims r
-                   JOIN labeled_claims l ON r.tweet_id = l.tweet_id
-                   GROUP BY r.ticker ORDER BY total DESC"""
-            )
+            cur.execute(f"""
+                SELECT r.ticker,
+                       COUNT(*) as total,
+                       SUM(CASE WHEN l.label = 'accurate' THEN 1 ELSE 0 END) as accurate,
+                       SUM(CASE WHEN l.label = 'exaggerated' THEN 1 ELSE 0 END) as exaggerated,
+                       SUM(CASE WHEN l.label = 'understated' THEN 1 ELSE 0 END) as understated
+                FROM raw_claims r
+                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                WHERE {FRESHNESS_FILTER}
+                GROUP BY r.ticker ORDER BY total DESC
+            """)
             stats["accuracy_by_ticker"] = [
                 {
                     "ticker": row[0], "total": row[1],
@@ -706,7 +721,7 @@ class SentinelDB:
             FROM labeled_claims l
             JOIN raw_claims r ON r.tweet_id = l.tweet_id
             LEFT JOIN accounts a ON r.username = a.username
-            WHERE r.ticker = %s
+            WHERE r.ticker = %s AND {FRESHNESS_FILTER}
         """
         params: list = [ticker]
         if exclude_bots:
@@ -740,14 +755,14 @@ class SentinelDB:
         with conn.cursor() as cur:
             # Total claims and label distribution
             cur.execute(
-                """
+                f"""
                 SELECT COUNT(*) as total,
                        SUM(CASE WHEN l.label = 'exaggerated' THEN 1 ELSE 0 END) as exaggerated,
                        SUM(CASE WHEN l.label = 'accurate' THEN 1 ELSE 0 END) as accurate,
                        SUM(CASE WHEN l.label = 'understated' THEN 1 ELSE 0 END) as understated
                 FROM raw_claims r
                 JOIN labeled_claims l ON r.tweet_id = l.tweet_id
-                WHERE r.ticker = %s
+                WHERE r.ticker = %s AND {FRESHNESS_FILTER}
                 """,
                 (ticker,),
             )
@@ -766,11 +781,12 @@ class SentinelDB:
 
             # Top catalysts
             cur.execute(
-                """
+                f"""
                 SELECT r.catalyst_type, COUNT(*) as cnt
                 FROM raw_claims r
                 JOIN labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE r.ticker = %s AND r.catalyst_type IS NOT NULL
+                  AND {FRESHNESS_FILTER}
                 GROUP BY r.catalyst_type
                 ORDER BY cnt DESC
                 """,
@@ -783,11 +799,12 @@ class SentinelDB:
 
             # Average price change
             cur.execute(
-                """
+                f"""
                 SELECT AVG(r.price_change_pct)
                 FROM raw_claims r
                 JOIN labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE r.ticker = %s AND r.price_change_pct IS NOT NULL
+                  AND {FRESHNESS_FILTER}
                 """,
                 (ticker,),
             )
@@ -796,11 +813,11 @@ class SentinelDB:
 
             # Top accounts by claim count for this ticker
             cur.execute(
-                """
+                f"""
                 SELECT r.username, COUNT(*) as cnt
                 FROM raw_claims r
                 JOIN labeled_claims l ON r.tweet_id = l.tweet_id
-                WHERE r.ticker = %s
+                WHERE r.ticker = %s AND {FRESHNESS_FILTER}
                 GROUP BY r.username
                 ORDER BY cnt DESC
                 LIMIT 10

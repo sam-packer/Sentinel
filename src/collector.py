@@ -53,6 +53,9 @@ class CollectionStatus:
     tickers_total: int = 0
     scrape_tweets_found: int = 0
     current_ticker: str | None = None
+    # Classification progress
+    accounts_classified: int = 0
+    accounts_total: int = 0
     # Enrichment progress
     scraped: int = 0
     enriched: int = 0
@@ -163,27 +166,38 @@ def _is_market_hours(dt: datetime) -> bool:
     return market_open <= et_dt <= market_close
 
 
+MAX_TWEET_AGE = timedelta(days=90)
+
+
 def _filter_mature_claims(claims, logger_instance=logger):
-    """Remove tweets less than 25h old (24h price window hasn't elapsed)."""
+    """Remove tweets less than 25h old or stale outliers (created >90 days before scrape)."""
     now = datetime.now(tz=timezone.utc)
     min_age = timedelta(hours=25)
     mature = []
-    skipped = 0
+    too_new = 0
+    too_old = 0
     for claim in claims:
         tweet_time = claim.created_at
         if tweet_time.tzinfo is None:
             tweet_time = tweet_time.replace(tzinfo=timezone.utc)
         if now - tweet_time < min_age:
-            skipped += 1
+            too_new += 1
+        elif now - tweet_time > MAX_TWEET_AGE:
+            too_old += 1
         else:
             mature.append(claim)
 
-    if skipped:
+    if too_new:
         logger_instance.warning(
-            f"Skipped {skipped} tweets less than 25h old — "
-            f"the 24h price window hasn't elapsed yet. "
-            f"Proceeding with {len(mature)} mature tweets."
+            f"Skipped {too_new} tweets less than 25h old — "
+            f"the 24h price window hasn't elapsed yet."
         )
+    if too_old:
+        logger_instance.warning(
+            f"Skipped {too_old} stale tweets older than {MAX_TWEET_AGE.days} days."
+        )
+    if too_new or too_old:
+        logger_instance.info(f"Proceeding with {len(mature)} tweets.")
     return mature
 
 
@@ -230,12 +244,14 @@ async def _enrich_and_label(claims, db, status, name, is_shutdown):
             logger.warning(f"Failed to process claim {claim.tweet_id}: {e}")
 
 
-def _classify_new_accounts(claims, db, status, name):
+def _classify_new_accounts(claims, db, status, name, rejudge=False):
     """Classify any unclassified accounts from the current batch.
 
     Checks which usernames in the batch don't have a bot classification yet,
     classifies them via LLM-as-judge, and saves the results. Returns the set
     of bot usernames so the caller can filter them out.
+
+    If rejudge=True, reclassifies ALL accounts regardless of prior classification.
     """
     from .bot_detector import classify_accounts_batch
     from .config import config as app_config
@@ -245,6 +261,12 @@ def _classify_new_accounts(claims, db, status, name):
         logger.info("Bot detection disabled, skipping account classification")
         return set()
 
+    if rejudge:
+        logger.warning(
+            "Reclassifying all accounts (--rejudge). "
+            "This will call the LLM for every account."
+        )
+
     # Find unique usernames that haven't been classified
     usernames = {c.username for c in claims}
     unclassified = []
@@ -252,7 +274,7 @@ def _classify_new_accounts(claims, db, status, name):
 
     for username in usernames:
         account = db.get_account(username)
-        if account and account.classified_at is not None:
+        if not rejudge and account and account.classified_at is not None:
             if account.account_type != "human":
                 bot_usernames.add(username)
             continue
@@ -266,25 +288,39 @@ def _classify_new_accounts(claims, db, status, name):
 
     logger.info(f"Classifying {len(unclassified)} new accounts...")
     status.phase = f"classifying {len(unclassified)} accounts"
+    status.accounts_total = len(unclassified)
+    status.accounts_classified = 0
     _update_status(status, name)
 
-    results = classify_accounts_batch(unclassified, model=app_config.bot_detection.model)
-
     newly_classified = 0
-    for username, classification in results:
+
+    def _on_classified(username, classification, idx, total):
+        nonlocal newly_classified
+        # Save immediately so classifications survive crashes
         account = db.get_account(username) or Account(username=username)
         account.account_type = classification.account_type
-        account.classification_reason = f"{classification.account_type}: {classification.reason}"
+        account.classification_reason = (
+            f"{classification.account_type}: {classification.reason}"
+        )
         account.classified_at = datetime.now(timezone.utc)
         db.upsert_account(account)
 
         if classification.is_filtered:
             bot_usernames.add(username)
         newly_classified += 1
+
+        status.accounts_classified = idx + 1
+        _update_status(status, name)
         logger.info(
             f"  @{username}: {classification.account_type.upper()} "
             f"({classification.confidence:.0%}) — {classification.reason}"
         )
+
+    classify_accounts_batch(
+        unclassified,
+        model=app_config.bot_detection.model,
+        on_classified=_on_classified,
+    )
 
     logger.info(
         f"Account classification done: {newly_classified} classified, "
@@ -477,6 +513,7 @@ async def run_enrichment(
     since: datetime | None = None,
     until: datetime | None = None,
     unlabeled_only: bool = False,
+    rejudge: bool = False,
 ) -> None:
     """Re-enrich existing raw claims without scraping.
 
@@ -524,7 +561,7 @@ async def run_enrichment(
         claims = _filter_mature_claims(claims)
 
         # Classify accounts and filter bots
-        bot_usernames = _classify_new_accounts(claims, db, status, name)
+        bot_usernames = _classify_new_accounts(claims, db, status, name, rejudge=rejudge)
         if bot_usernames:
             pre_filter = len(claims)
             claims = [c for c in claims if c.username not in bot_usernames]

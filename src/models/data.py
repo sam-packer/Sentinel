@@ -49,7 +49,8 @@ def load_labeled_claims(db: SentinelDB) -> list[dict]:
         FROM labeled_claims l
         JOIN raw_claims r ON r.tweet_id = l.tweet_id
         LEFT JOIN accounts a ON r.username = a.username
-        WHERE a.account_type IS NULL OR a.account_type = 'human'
+        WHERE (a.account_type IS NULL OR a.account_type = 'human')
+          AND r.created_at >= r.scraped_at - INTERVAL '90 days'
         ORDER BY r.created_at
     """
     columns, rows = db.execute_query(query)

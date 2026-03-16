@@ -96,6 +96,14 @@ def _show_status(name: str) -> None:
             if st.current_ticker:
                 click.echo(f"  Current:  {st.current_ticker}")
         else:
+            if st.phase.startswith("classifying") and st.accounts_total > 0:
+                cls_pct = st.accounts_classified / st.accounts_total * 100
+                filled = int(cls_pct / 100 * 20)
+                bar = "\u2588" * filled + "\u2591" * (20 - filled)
+                click.echo(
+                    f"  Classify: {st.accounts_classified}/{st.accounts_total} "
+                    f"({cls_pct:.0f}%) [{bar}]"
+                )
             total = st.scraped
             done = st.enriched
             pct = (done / total * 100) if total > 0 else 0
@@ -355,6 +363,7 @@ def collect(
 @click.option("--days", default=None, type=int,
               help="Only enrich claims from the last N days")
 @click.option("--unlabeled", is_flag=True, help="Only enrich claims that haven't been labeled yet")
+@click.option("--rejudge", is_flag=True, help="Reclassify ALL accounts, not just unclassified ones")
 @click.option("--background", is_flag=True, help="Run in background")
 @click.option("--status", "show_status", is_flag=True, help="Check background enrichment progress")
 @click.option("--stop", "do_stop", is_flag=True, help="Stop background enrichment")
@@ -363,6 +372,7 @@ def enrich(
     tickers: str | None,
     days: int | None,
     unlabeled: bool,
+    rejudge: bool,
     background: bool,
     show_status: bool,
     do_stop: bool,
@@ -411,6 +421,8 @@ def enrich(
             cmd.extend(["--days", str(days)])
         if unlabeled:
             cmd.append("--unlabeled")
+        if rejudge:
+            cmd.append("--rejudge")
 
         pid = _launch_background(cmd, "data/enrich.log")
         click.echo(f"Enrichment started in background (PID {pid})")
@@ -438,6 +450,7 @@ def enrich(
         since=since,
         until=until,
         unlabeled_only=unlabeled,
+        rejudge=rejudge,
     ))
 
     if not _daemonized:

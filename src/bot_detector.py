@@ -9,6 +9,7 @@ processing, result is cached in the accounts table.
 import json
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import anthropic
@@ -102,19 +103,23 @@ def classify_account(username: str, sample_tweets: list[str], model: str = "clau
 def classify_accounts_batch(
     accounts: list[dict],
     model: str = "claude-haiku-4-5-20251001",
+    on_classified: Callable | None = None,
 ) -> list[tuple[str, BotClassification]]:
     """Classify multiple accounts.
 
     Args:
         accounts: List of dicts with 'username' and 'sample_tweets' keys.
         model: Anthropic model ID to use for classification.
+        on_classified: Optional callback called after each account is classified.
+            Signature: on_classified(username, classification, idx, total).
 
     Returns:
         List of (username, BotClassification) tuples.
     """
     results = []
+    total = len(accounts)
 
-    for account in accounts:
+    for idx, account in enumerate(accounts):
         username = account["username"]
         tweets = account["sample_tweets"]
 
@@ -124,10 +129,14 @@ def classify_accounts_batch(
         except Exception as e:
             logger.error(f"Failed to classify @{username}: {e}")
             # Default to human on error (don't filter real people)
-            results.append((username, BotClassification(
+            classification = BotClassification(
                 account_type="human",
                 confidence=0.0,
                 reason=f"Classification failed: {e}",
-            )))
+            )
+            results.append((username, classification))
+
+        if on_classified is not None:
+            on_classified(username, classification, idx, total)
 
     return results
