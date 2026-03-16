@@ -6,11 +6,35 @@ moves, and classifies claims as exaggerated, accurate, or understated.
 """
 
 import logging
+import re
 from typing import Literal
 
 from .models import RawClaim, LabeledClaim
 
 logger = logging.getLogger("sentinel.labeler")
+
+# Regex to strip punctuation from word boundaries for single-word matching
+_WORD_SPLIT_RE = re.compile(r"[a-z0-9']+")
+
+
+def _count_keyword_matches(text: str, keywords: set[str]) -> int:
+    """Count keyword matches using word-boundary-aware matching.
+
+    Single-word keywords are matched against individual words (with
+    punctuation stripped) to avoid false positives like "run" matching
+    "runtime". Multi-word keywords use substring matching, which is
+    correct for phrases like "load up" or "getting out".
+    """
+    lowered = text.lower()
+    words = set(_WORD_SPLIT_RE.findall(lowered))
+
+    single_word = {kw for kw in keywords if " " not in kw}
+    multi_word = keywords - single_word
+
+    count = len(words & single_word)
+    count += sum(1 for kw in multi_word if kw in lowered)
+    return count
+
 
 # Direction signal keywords
 _UP_SIGNALS = {
@@ -34,12 +58,10 @@ def parse_direction(text: str) -> Literal["up", "down", "neutral"]:
     Uses keyword and emoji matching. If both bullish and bearish
     signals are present, returns "neutral".
     """
-    lowered = text.lower()
-
-    up_score = sum(1 for kw in _UP_SIGNALS if kw in lowered)
+    up_score = _count_keyword_matches(text, _UP_SIGNALS)
     up_score += sum(1 for e in _UP_EMOJI if e in text)
 
-    down_score = sum(1 for kw in _DOWN_SIGNALS if kw in lowered)
+    down_score = _count_keyword_matches(text, _DOWN_SIGNALS)
     down_score += sum(1 for e in _DOWN_EMOJI if e in text)
 
     if up_score > 0 and down_score > 0:
@@ -64,7 +86,6 @@ def _actual_direction(price_change_pct: float | None) -> Literal["up", "down", "
 
 def _intensity_score(text: str) -> float:
     """Rough measure of how intense/hyperbolic the tweet language is (0-1)."""
-    lowered = text.lower()
     score = 0.0
 
     # Exclamation marks
@@ -79,8 +100,8 @@ def _intensity_score(text: str) -> float:
     score += min(sum(1 for e in _UP_EMOJI | _DOWN_EMOJI if e in text) * 0.1, 0.3)
 
     # Superlatives
-    superlatives = ["insane", "massive", "huge", "crazy", "unbelievable", "incredible"]
-    score += min(sum(0.1 for s in superlatives if s in lowered), 0.2)
+    superlatives = {"insane", "massive", "huge", "crazy", "unbelievable", "incredible"}
+    score += min(_count_keyword_matches(text, superlatives) * 0.1, 0.2)
 
     return min(score, 1.0)
 

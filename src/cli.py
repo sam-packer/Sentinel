@@ -9,7 +9,9 @@ Usage:
   uv run collect --n 100 --background — Run collection in background
   uv run collect --status             — Check collection progress
   uv run collect --stop               — Stop background collection
-  uv run enrich                       — Re-enrich existing claims
+  uv run enrich                       — Re-enrich with both labelers (default)
+  uv run enrich --naive               — Re-enrich with naive labeler only
+  uv run enrich --improved            — Re-enrich with improved labeler only
   uv run enrich --background          — Run enrichment in background
   uv run enrich --status              — Check enrichment progress
   uv run enrich --stop                — Stop background enrichment
@@ -363,9 +365,9 @@ def collect(
 @click.option("--unlabeled", is_flag=True, help="Only enrich claims that haven't been labeled yet")
 @click.option("--rejudge", is_flag=True, help="Reclassify ALL accounts, not just unclassified ones")
 @click.option("--naive", "labeler", flag_value="naive",
-              help="Use naive (keyword-based) labeler")
+              help="Only run naive (keyword-based) labeler")
 @click.option("--improved", "labeler", flag_value="improved",
-              help="Use improved (NLP-enhanced) labeler")
+              help="Only run improved (NLP-enhanced) labeler")
 @click.option("--background", is_flag=True, help="Run in background")
 @click.option("--status", "show_status", is_flag=True, help="Check background enrichment progress")
 @click.option("--stop", "do_stop", is_flag=True, help="Stop background enrichment")
@@ -376,7 +378,7 @@ def enrich(
     days: int | None,
     unlabeled: bool,
     rejudge: bool,
-    labeler: str,
+    labeler: str | None,
     background: bool,
     show_status: bool,
     do_stop: bool,
@@ -385,13 +387,17 @@ def enrich(
 ):
     """Re-enrich existing raw claims with fresh price and news data.
 
-    Requires --naive or --improved to specify which labeler to use.
+    Runs both labelers by default. Use --naive or --improved to run only one.
     """
     _init()
 
     # When launched as a background subprocess, use the hidden --_labeler flag
     if _labeler is not None:
         labeler = _labeler
+
+    # Default to both labelers
+    if labeler is None:
+        labeler = "both"
 
     if show_status:
         _show_status("enrich")
@@ -400,10 +406,6 @@ def enrich(
     if do_stop:
         _stop_background("enrich")
         return
-
-    if labeler is None:
-        click.echo("Error: specify --naive or --improved to choose a labeler.", err=True)
-        sys.exit(1)
 
     if not config.database.url:
         click.echo("Error: DATABASE_URL not set. Enrich reads from the database.", err=True)
@@ -441,7 +443,8 @@ def enrich(
             cmd.append("--rejudge")
 
         pid = _launch_background(cmd, "data/enrich.log")
-        click.echo(f"Enrichment ({labeler} labeler) started in background (PID {pid})")
+        label_desc = "both labelers" if labeler == "both" else f"{labeler} labeler"
+        click.echo(f"Enrichment ({label_desc}) started in background (PID {pid})")
         click.echo("  uv run enrich --status  — check progress")
         click.echo("  uv run enrich --stop    — stop enrichment")
         return
@@ -450,7 +453,8 @@ def enrich(
     from .collector import read_status, run_enrichment
 
     if not _daemonized:
-        parts = [f"Re-enriching ({labeler} labeler)"]
+        label_desc = "both labelers" if labeler == "both" else f"{labeler} labeler"
+        parts = [f"Re-enriching ({label_desc})"]
         if unlabeled:
             parts.append("unlabeled")
         parts.append("claims")

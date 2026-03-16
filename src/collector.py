@@ -254,24 +254,33 @@ def _filter_mature_claims(claims, logger_instance=logger):
     return mature
 
 
-async def _enrich_and_label(claims, db, status, name, is_shutdown, labeler="naive"):
+async def _enrich_and_label(claims, db, status, name, is_shutdown, labeler="both"):
     """Shared enrichment loop used by both collect and enrich pipelines.
 
-    Args:
-        labeler: "naive" or "improved" — which labeling system to use.
-    """
-    if labeler == "improved":
-        from .data.improved_labeler import label_claim_improved as do_label
-        label_table = "improved_labeled_claims"
-    else:
-        from .data.labeler import label_claim as do_label
-        label_table = "naive_labeled_claims"
+    Enriches each claim (price, news) once, then labels with the specified
+    labeler(s). Using "both" avoids fetching prices and news twice.
 
+    Args:
+        labeler: "naive", "improved", or "both" (default).
+    """
+    from .data.labeler import label_claim as naive_label
+    from .data.improved_labeler import label_claim_improved as improved_label
     from .news_fetcher import classify_catalyst, fetch_news_for_claim
     from .price_fetcher import PriceFetcher
 
+    if labeler == "both":
+        labelers = [
+            (naive_label, "naive_labeled_claims"),
+            (improved_label, "improved_labeled_claims"),
+        ]
+    elif labeler == "improved":
+        labelers = [(improved_label, "improved_labeled_claims")]
+    else:
+        labelers = [(naive_label, "naive_labeled_claims")]
+
     pf = PriceFetcher()
-    logger.info(f"Using {labeler} labeler → {label_table}")
+    labeler_names = ", ".join(t for _, t in labelers)
+    logger.info(f"Enriching → {labeler_names}")
 
     for i, claim in enumerate(claims):
         if is_shutdown():
@@ -294,12 +303,12 @@ async def _enrich_and_label(claims, db, status, name, is_shutdown, labeler="naiv
             status.enriched = i + 1
             status.current_ticker = claim.ticker
 
-            labeled = do_label(claim)
+            for do_label, label_table in labelers:
+                labeled = do_label(claim)
+                if db:
+                    db.insert_labeled_claim(labeled, label_table=label_table)
+
             status.labeled += 1
-
-            if db:
-                db.insert_labeled_claim(labeled, label_table=label_table)
-
             _update_status(status, name)
 
         except Exception as e:
@@ -535,9 +544,8 @@ async def run_collection(
         if db:
             _classify_new_accounts(claims, db, status, name)
 
-        # 6. Enrich + label
-        await _enrich_and_label(claims, db, status, name, is_shutdown, labeler="naive")
-        await _enrich_and_label(claims, db, status, name, is_shutdown, labeler="improved")
+        # 6. Enrich + label (both labelers in one pass)
+        await _enrich_and_label(claims, db, status, name, is_shutdown)
 
         if db:
             db.close()
@@ -571,7 +579,7 @@ async def run_enrichment(
     until: datetime | None = None,
     unlabeled_only: bool = False,
     rejudge: bool = False,
-    labeler: str = "naive",
+    labeler: str = "both",
 ) -> None:
     """Re-enrich existing raw claims without scraping.
 
@@ -579,7 +587,7 @@ async def run_enrichment(
     re-labels, and updates the database.
 
     Args:
-        labeler: "naive" or "improved" — which labeling system to use.
+        labeler: "both" (default), "naive", or "improved".
     """
     from .data.db import SentinelDB
 
@@ -604,10 +612,29 @@ async def run_enrichment(
         db.connect()
         db.init_schema()
 
-        claims = db.get_raw_claims(
-            tickers=tickers, since=since, until=until,
-            unlabeled_only=unlabeled_only, labels=labeler,
-        )
+        # For --both --unlabeled, get tweets unlabeled in either table
+        if labeler == "both" and unlabeled_only:
+            naive_claims = db.get_raw_claims(
+                tickers=tickers, since=since, until=until,
+                unlabeled_only=True, labels="naive",
+            )
+            improved_claims = db.get_raw_claims(
+                tickers=tickers, since=since, until=until,
+                unlabeled_only=True, labels="improved",
+            )
+            # Union by tweet_id
+            seen = set()
+            claims = []
+            for c in naive_claims + improved_claims:
+                if c.tweet_id not in seen:
+                    seen.add(c.tweet_id)
+                    claims.append(c)
+        else:
+            query_labels = "naive" if labeler == "both" else labeler
+            claims = db.get_raw_claims(
+                tickers=tickers, since=since, until=until,
+                unlabeled_only=unlabeled_only, labels=query_labels,
+            )
 
         if not claims:
             logger.info("No claims to enrich")
@@ -628,7 +655,7 @@ async def run_enrichment(
         status.scraped = len(claims)
         status.phase = "enriching"
         _update_status(status, name)
-        logger.info(f"Enriching {len(claims)} claims with {labeler} labeler")
+        logger.info(f"Enriching {len(claims)} claims ({labeler} labeler)")
 
         await _enrich_and_label(claims, db, status, name, is_shutdown, labeler=labeler)
 
