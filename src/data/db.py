@@ -76,19 +76,27 @@ CREATE TABLE IF NOT EXISTS accounts (
     username VARCHAR(255) PRIMARY KEY,
     account_type VARCHAR(10) DEFAULT 'human',
     classification_reason TEXT,
-    total_claims INTEGER DEFAULT 0,
-    exaggerated_count INTEGER DEFAULT 0,
-    accurate_count INTEGER DEFAULT 0,
-    understated_count INTEGER DEFAULT 0,
-    grifter_score DOUBLE PRECISION,
+    -- Naive labeler scores
+    naive_total_claims INTEGER DEFAULT 0,
+    naive_exaggerated_count INTEGER DEFAULT 0,
+    naive_accurate_count INTEGER DEFAULT 0,
+    naive_understated_count INTEGER DEFAULT 0,
+    naive_grifter_score DOUBLE PRECISION,
+    -- Improved labeler scores
+    improved_total_claims INTEGER DEFAULT 0,
+    improved_exaggerated_count INTEGER DEFAULT 0,
+    improved_accurate_count INTEGER DEFAULT 0,
+    improved_understated_count INTEGER DEFAULT 0,
+    improved_grifter_score DOUBLE PRECISION,
     first_seen TIMESTAMPTZ,
     last_seen TIMESTAMPTZ,
     classified_at TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_accounts_grifter_score ON accounts(grifter_score);
+CREATE INDEX IF NOT EXISTS idx_accounts_naive_grifter ON accounts(naive_grifter_score);
+CREATE INDEX IF NOT EXISTS idx_accounts_improved_grifter ON accounts(improved_grifter_score);
 CREATE INDEX IF NOT EXISTS idx_accounts_account_type ON accounts(account_type);
-CREATE INDEX IF NOT EXISTS idx_accounts_total_claims ON accounts(total_claims DESC);
+CREATE INDEX IF NOT EXISTS idx_accounts_naive_total ON accounts(naive_total_claims DESC);
 """
 
 
@@ -338,7 +346,7 @@ class SentinelDB:
                     labeled.exaggeration_score, labeled.news_summary,
                 ),
             )
-        self.update_account_scores(labeled.username)
+        self.update_account_scores(labeled.username, label_table=label_table)
 
     def get_feed(
         self,
@@ -526,33 +534,30 @@ class SentinelDB:
         return results
 
     def upsert_account(self, account: Account) -> None:
-        """Insert or update an account record."""
+        """Insert or update an account record.
+
+        Only updates classification fields (account_type, classification_reason,
+        classified_at) and timestamps. Score fields are updated by
+        update_account_scores() which targets specific label columns.
+        """
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO accounts
-                    (username, account_type, classification_reason, total_claims,
-                     exaggerated_count, accurate_count, understated_count,
-                     grifter_score, first_seen, last_seen, classified_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    (username, account_type, classification_reason,
+                     first_seen, last_seen, classified_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (username) DO UPDATE SET
                     account_type = EXCLUDED.account_type,
                     classification_reason = EXCLUDED.classification_reason,
-                    total_claims = EXCLUDED.total_claims,
-                    exaggerated_count = EXCLUDED.exaggerated_count,
-                    accurate_count = EXCLUDED.accurate_count,
-                    understated_count = EXCLUDED.understated_count,
-                    grifter_score = EXCLUDED.grifter_score,
                     first_seen = EXCLUDED.first_seen,
                     last_seen = EXCLUDED.last_seen,
                     classified_at = EXCLUDED.classified_at
                 """,
                 (
                     account.username, account.account_type, account.classification_reason,
-                    account.total_claims, account.exaggerated_count,
-                    account.accurate_count, account.understated_count,
-                    account.grifter_score, account.first_seen,
+                    account.first_seen,
                     account.last_seen, account.classified_at,
                 ),
             )
@@ -568,23 +573,11 @@ class SentinelDB:
                 return None
             columns = [desc[0] for desc in cur.description]
             d = dict(zip(columns, row))
-        return Account(
-            username=d["username"],
-            account_type=d.get("account_type", "human"),
-            classification_reason=d.get("classification_reason"),
-            total_claims=d.get("total_claims", 0),
-            exaggerated_count=d.get("exaggerated_count", 0),
-            accurate_count=d.get("accurate_count", 0),
-            understated_count=d.get("understated_count", 0),
-            grifter_score=d.get("grifter_score"),
-            first_seen=d.get("first_seen"),
-            last_seen=d.get("last_seen"),
-            classified_at=d.get("classified_at"),
-        )
+        return self._row_to_account(d)
 
     def get_accounts(
         self,
-        sort_by: str = "grifter_score",
+        sort_by: str = "naive_grifter_score",
         order: str = "desc",
         min_claims: int = 0,
         account_type: str | None = None,
@@ -592,12 +585,16 @@ class SentinelDB:
         offset: int = 0,
     ) -> list[Account]:
         """Get paginated, filterable, sortable account list."""
-        allowed_sort = {"grifter_score", "total_claims", "username", "last_seen"}
+        allowed_sort = {
+            "naive_grifter_score", "improved_grifter_score",
+            "naive_total_claims", "improved_total_claims",
+            "username", "last_seen",
+        }
         if sort_by not in allowed_sort:
-            sort_by = "grifter_score"
+            sort_by = "naive_grifter_score"
         order_dir = "ASC" if order.lower() == "asc" else "DESC"
 
-        query = "SELECT * FROM accounts WHERE total_claims >= %s"
+        query = "SELECT * FROM accounts WHERE naive_total_claims >= %s"
         params: list = [min_claims]
 
         if account_type is not None:
@@ -614,30 +611,48 @@ class SentinelDB:
             columns = [desc[0] for desc in cur.description]
             rows = cur.fetchall()
 
-        accounts = []
-        for row in rows:
-            d = dict(zip(columns, row))
-            accounts.append(Account(
-                username=d["username"],
-                account_type=d.get("account_type", "human"),
-                classification_reason=d.get("classification_reason"),
-                total_claims=d.get("total_claims", 0),
-                exaggerated_count=d.get("exaggerated_count", 0),
-                accurate_count=d.get("accurate_count", 0),
-                understated_count=d.get("understated_count", 0),
-                grifter_score=d.get("grifter_score"),
-                first_seen=d.get("first_seen"),
-                last_seen=d.get("last_seen"),
-                classified_at=d.get("classified_at"),
-            ))
-        return accounts
+        return [self._row_to_account(dict(zip(columns, row))) for row in rows]
 
-    def update_account_scores(self, username: str) -> None:
-        """Recalculate account stats from actual labeled claim data."""
+    @staticmethod
+    def _row_to_account(d: dict) -> Account:
+        """Build an Account from a row dict."""
+        return Account(
+            username=d["username"],
+            account_type=d.get("account_type", "human"),
+            classification_reason=d.get("classification_reason"),
+            naive_total_claims=d.get("naive_total_claims", 0),
+            naive_exaggerated_count=d.get("naive_exaggerated_count", 0),
+            naive_accurate_count=d.get("naive_accurate_count", 0),
+            naive_understated_count=d.get("naive_understated_count", 0),
+            naive_grifter_score=d.get("naive_grifter_score"),
+            improved_total_claims=d.get("improved_total_claims", 0),
+            improved_exaggerated_count=d.get("improved_exaggerated_count", 0),
+            improved_accurate_count=d.get("improved_accurate_count", 0),
+            improved_understated_count=d.get("improved_understated_count", 0),
+            improved_grifter_score=d.get("improved_grifter_score"),
+            first_seen=d.get("first_seen"),
+            last_seen=d.get("last_seen"),
+            classified_at=d.get("classified_at"),
+        )
+
+    def update_account_scores(
+        self,
+        username: str,
+        label_table: str = "naive_labeled_claims",
+    ) -> None:
+        """Recalculate account stats from labeled claim data.
+
+        Args:
+            username: Twitter handle.
+            label_table: Which label table to compute scores from.
+        """
+        if label_table not in ("naive_labeled_claims", "improved_labeled_claims"):
+            raise ValueError(f"Invalid label_table: {label_table}")
+
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) as total,
                     SUM(CASE WHEN l.label = 'exaggerated' THEN 1 ELSE 0 END) as exaggerated,
@@ -646,7 +661,7 @@ class SentinelDB:
                     MIN(r.created_at) as first_seen,
                     MAX(r.created_at) as last_seen
                 FROM raw_claims r
-                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
                 WHERE r.username = %s
                 """,
                 (username,),
@@ -661,19 +676,23 @@ class SentinelDB:
         last_seen = row[5]
         grifter_score = exaggerated / total if total >= 5 else None
 
+        # Determine column prefix from table name
+        prefix = "naive" if label_table == "naive_labeled_claims" else "improved"
+
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 INSERT INTO accounts
-                    (username, total_claims, exaggerated_count, accurate_count,
-                     understated_count, grifter_score, first_seen, last_seen)
+                    (username, {prefix}_total_claims, {prefix}_exaggerated_count,
+                     {prefix}_accurate_count, {prefix}_understated_count,
+                     {prefix}_grifter_score, first_seen, last_seen)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (username) DO UPDATE SET
-                    total_claims = EXCLUDED.total_claims,
-                    exaggerated_count = EXCLUDED.exaggerated_count,
-                    accurate_count = EXCLUDED.accurate_count,
-                    understated_count = EXCLUDED.understated_count,
-                    grifter_score = EXCLUDED.grifter_score,
+                    {prefix}_total_claims = EXCLUDED.{prefix}_total_claims,
+                    {prefix}_exaggerated_count = EXCLUDED.{prefix}_exaggerated_count,
+                    {prefix}_accurate_count = EXCLUDED.{prefix}_accurate_count,
+                    {prefix}_understated_count = EXCLUDED.{prefix}_understated_count,
+                    {prefix}_grifter_score = EXCLUDED.{prefix}_grifter_score,
                     first_seen = EXCLUDED.first_seen,
                     last_seen = EXCLUDED.last_seen
                 """,
@@ -860,23 +879,29 @@ class SentinelDB:
     def get_leaderboard(
         self,
         category: str = "grifters",
+        labels: str = "naive",
         limit: int = 20,
     ) -> list[dict]:
-        """Get account leaderboard by category."""
-        if category == "signal":
-            order_dir = "ASC"
-        else:
-            order_dir = "DESC"
+        """Get account leaderboard by category.
+
+        Args:
+            category: "grifters" (worst first) or "signal" (best first).
+            labels: "naive" or "improved" — which grifter scores to rank by.
+        """
+        order_dir = "ASC" if category == "signal" else "DESC"
+        prefix = "naive" if labels == "naive" else "improved"
 
         conn = self._get_conn()
         query = f"""
-            SELECT username, grifter_score, total_claims,
-                   exaggerated_count, accurate_count
+            SELECT username, {prefix}_grifter_score as grifter_score,
+                   {prefix}_total_claims as total_claims,
+                   {prefix}_exaggerated_count as exaggerated_count,
+                   {prefix}_accurate_count as accurate_count
             FROM accounts
-            WHERE grifter_score IS NOT NULL
-              AND total_claims >= 5
+            WHERE {prefix}_grifter_score IS NOT NULL
+              AND {prefix}_total_claims >= 5
               AND account_type = 'human'
-            ORDER BY grifter_score {order_dir}
+            ORDER BY {prefix}_grifter_score {order_dir}
             LIMIT %s
         """
         with conn.cursor() as cur:

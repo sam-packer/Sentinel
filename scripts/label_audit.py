@@ -32,13 +32,13 @@ def main():
 
     cols, rows = db.execute_query("""
         SELECT a.username, a.account_type, a.classification_reason,
-               a.total_claims, a.accurate_count, a.exaggerated_count,
-               a.grifter_score
+               a.naive_total_claims, a.naive_accurate_count, a.naive_exaggerated_count,
+               a.naive_grifter_score
         FROM accounts a
         WHERE a.account_type IN ('bot', 'garbage')
-          AND a.total_claims >= 3
-          AND a.accurate_count > 0
-        ORDER BY a.accurate_count DESC
+          AND a.naive_total_claims >= 3
+          AND a.naive_accurate_count > 0
+        ORDER BY a.naive_accurate_count DESC
         LIMIT 20
     """)
 
@@ -77,13 +77,13 @@ def main():
 
     cols, rows = db.execute_query("""
         SELECT a.username, a.account_type, a.classification_reason,
-               a.total_claims, a.accurate_count, a.exaggerated_count,
-               a.grifter_score
+               a.naive_total_claims, a.naive_accurate_count, a.naive_exaggerated_count,
+               a.naive_grifter_score
         FROM accounts a
         WHERE a.account_type = 'human'
-          AND a.grifter_score >= 0.6
-          AND a.total_claims >= 5
-        ORDER BY a.grifter_score DESC
+          AND a.naive_grifter_score >= 0.6
+          AND a.naive_total_claims >= 5
+        ORDER BY a.naive_grifter_score DESC
         LIMIT 20
     """)
 
@@ -121,14 +121,14 @@ def main():
     print("=" * 90)
 
     cols, rows = db.execute_query("""
-        SELECT a.username, a.total_claims, a.accurate_count,
+        SELECT a.username, a.naive_total_claims, a.naive_accurate_count,
                a.classification_reason
         FROM accounts a
         WHERE a.account_type = 'human'
-          AND a.total_claims >= 5
-          AND a.exaggerated_count = 0
-          AND a.understated_count = 0
-        ORDER BY a.total_claims DESC
+          AND a.naive_total_claims >= 5
+          AND a.naive_exaggerated_count = 0
+          AND a.naive_understated_count = 0
+        ORDER BY a.naive_total_claims DESC
         LIMIT 15
     """)
 
@@ -165,11 +165,11 @@ def main():
         SELECT
             a.account_type,
             COUNT(*) as accounts,
-            SUM(a.total_claims) as total_claims,
-            SUM(a.accurate_count) as accurate,
-            SUM(a.exaggerated_count) as exaggerated,
-            SUM(a.understated_count) as understated,
-            AVG(a.grifter_score) FILTER (WHERE a.grifter_score IS NOT NULL) as avg_grifter
+            SUM(a.naive_total_claims) as total_claims,
+            SUM(a.naive_accurate_count) as accurate,
+            SUM(a.naive_exaggerated_count) as exaggerated,
+            SUM(a.naive_understated_count) as understated,
+            AVG(a.naive_grifter_score) FILTER (WHERE a.naive_grifter_score IS NOT NULL) as avg_grifter
         FROM accounts a
         GROUP BY a.account_type
         ORDER BY accounts DESC

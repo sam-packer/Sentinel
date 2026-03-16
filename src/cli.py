@@ -53,14 +53,14 @@ def _launch_background(cmd: list[str], log_path: str) -> int:
     import subprocess
 
     Path("data").mkdir(parents=True, exist_ok=True)
-    with open(log_path, "w") as log_file:
-        with subprocess.Popen(
-            cmd,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        ) as proc:
-            return proc.pid
+    log_file = open(log_path, "w", encoding="utf-8")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    return proc.pid
 
 
 # ---------------------------------------------------------------------------
@@ -90,8 +90,8 @@ def _show_status(name: str) -> None:
         if st.state == "scraping":
             pct = (st.tickers_scraped / st.tickers_total * 100) if st.tickers_total > 0 else 0
             filled = int(pct / 100 * 20)
-            bar = "\u2588" * filled + "\u2591" * (20 - filled)
-            click.echo(f"  Scraping  [{bar}] {st.tickers_scraped}/{st.tickers_total} tickers ({pct:.0f}%)")
+            progress_bar = "\u2588" * filled + "\u2591" * (20 - filled)
+            click.echo(f"  Scraping  [{progress_bar}] {st.tickers_scraped}/{st.tickers_total} tickers ({pct:.0f}%)")
             click.echo(f"            {st.scrape_tweets_found} tweets found")
             if st.current_ticker:
                 click.echo(f"            currently: {st.current_ticker}")
@@ -99,16 +99,16 @@ def _show_status(name: str) -> None:
         elif st.phase.startswith("classifying") and st.accounts_total > 0:
             cls_pct = st.accounts_classified / st.accounts_total * 100
             filled = int(cls_pct / 100 * 20)
-            bar = "\u2588" * filled + "\u2591" * (20 - filled)
-            click.echo(f"  Classify  [{bar}] {st.accounts_classified}/{st.accounts_total} accounts ({cls_pct:.0f}%)")
+            progress_bar = "\u2588" * filled + "\u2591" * (20 - filled)
+            click.echo(f"  Classify  [{progress_bar}] {st.accounts_classified}/{st.accounts_total} accounts ({cls_pct:.0f}%)")
 
         else:
             total = st.scraped
             done = st.enriched
             pct = (done / total * 100) if total > 0 else 0
             filled = int(pct / 100 * 20)
-            bar = "\u2588" * filled + "\u2591" * (20 - filled)
-            click.echo(f"  Enrich    [{bar}] {done}/{total} claims ({pct:.0f}%)")
+            progress_bar = "\u2588" * filled + "\u2591" * (20 - filled)
+            click.echo(f"  Enrich    [{progress_bar}] {done}/{total} claims ({pct:.0f}%)")
             click.echo(f"            {st.labeled} labeled, {st.failed} failed")
             if st.current_ticker:
                 click.echo(f"            currently: {st.current_ticker}")

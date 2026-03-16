@@ -169,23 +169,71 @@ def _is_market_hours(dt: datetime) -> bool:
 MAX_TWEET_AGE = timedelta(days=90)
 
 
+def _next_trading_day(dt: datetime) -> datetime:
+    """Return the start of the next trading day at or after dt (9:30 AM ET).
+
+    Skips weekends. Does not handle market holidays — those will fail
+    gracefully in the price fetcher.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+    except ImportError:
+        et = timezone(timedelta(hours=-5))
+
+    et_dt = dt.astimezone(et)
+
+    # If it's a weekday and before market close, this day counts
+    if et_dt.weekday() < 5 and et_dt.hour < 16:
+        return dt
+
+    # Otherwise advance to next weekday 9:30 AM ET
+    next_day = et_dt.replace(hour=9, minute=30, second=0, microsecond=0) + timedelta(days=1)
+    while next_day.weekday() >= 5:
+        next_day += timedelta(days=1)
+    return next_day.astimezone(timezone.utc)
+
+
 def _filter_mature_claims(claims, logger_instance=logger):
-    """Remove tweets less than 25h old or stale outliers (created >90 days before scrape)."""
+    """Filter claims that can't be enriched yet.
+
+    Removes:
+    - Tweets less than 25h old (price window hasn't elapsed)
+    - Tweets older than 90 days (stale search results)
+    - Tweets whose 24h-later price window hasn't reached a trading day yet
+      (e.g., Friday afternoon tweets checked on Saturday)
+    """
     now = datetime.now(tz=timezone.utc)
     min_age = timedelta(hours=25)
     mature = []
     too_new = 0
     too_old = 0
+    no_trading_day = 0
+
     for claim in claims:
         tweet_time = claim.created_at
         if tweet_time.tzinfo is None:
             tweet_time = tweet_time.replace(tzinfo=timezone.utc)
+
         if now - tweet_time < min_age:
             too_new += 1
-        elif now - tweet_time > MAX_TWEET_AGE:
+            continue
+
+        if now - tweet_time > MAX_TWEET_AGE:
             too_old += 1
-        else:
-            mature.append(claim)
+            continue
+
+        # Check that the 24h-later window has reached a trading day
+        # that has already closed (so price data is available)
+        price_target = tweet_time + timedelta(hours=24)
+        next_trade = _next_trading_day(price_target)
+        # Need the trading day to have closed (4 PM ET + 1h buffer)
+        trade_close = next_trade + timedelta(hours=7, minutes=30)  # 9:30 + 7:30 = 17:00 (5 PM ET buffer)
+        if now < trade_close:
+            no_trading_day += 1
+            continue
+
+        mature.append(claim)
 
     if too_new:
         logger_instance.warning(
@@ -196,7 +244,12 @@ def _filter_mature_claims(claims, logger_instance=logger):
         logger_instance.warning(
             f"Skipped {too_old} stale tweets older than {MAX_TWEET_AGE.days} days."
         )
-    if too_new or too_old:
+    if no_trading_day:
+        logger_instance.warning(
+            f"Skipped {no_trading_day} tweets — the 24h price window "
+            f"hasn't reached a closed trading day yet."
+        )
+    if too_new or too_old or no_trading_day:
         logger_instance.info(f"Proceeding with {len(mature)} tweets.")
     return mature
 
@@ -478,17 +531,9 @@ async def run_collection(
 
         status.scraped = len(claims)
 
-        # 5. Classify accounts and filter bots
+        # 5. Classify accounts (enrich everything, training filters to humans)
         if db:
-            bot_usernames = _classify_new_accounts(claims, db, status, name)
-            if bot_usernames:
-                pre_filter = len(claims)
-                claims = [c for c in claims if c.username not in bot_usernames]
-                logger.info(
-                    f"Filtered {pre_filter - len(claims)} bot tweets, "
-                    f"{len(claims)} human tweets to enrich"
-                )
-                status.scraped = len(claims)
+            _classify_new_accounts(claims, db, status, name)
 
         # 6. Enrich + label
         await _enrich_and_label(claims, db, status, name, is_shutdown)
@@ -575,15 +620,9 @@ async def run_enrichment(
 
         claims = _filter_mature_claims(claims)
 
-        # Classify accounts and filter bots
-        bot_usernames = _classify_new_accounts(claims, db, status, name, rejudge=rejudge)
-        if bot_usernames:
-            pre_filter = len(claims)
-            claims = [c for c in claims if c.username not in bot_usernames]
-            logger.info(
-                f"Filtered {pre_filter - len(claims)} bot tweets, "
-                f"{len(claims)} human tweets to enrich"
-            )
+        # Classify accounts (but don't filter — enrich everything,
+        # training data loader handles human-only filtering)
+        _classify_new_accounts(claims, db, status, name, rejudge=rejudge)
 
         status.scraped = len(claims)
         status.phase = "enriching"

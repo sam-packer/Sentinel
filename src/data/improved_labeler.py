@@ -161,21 +161,18 @@ def _classify_non_predictive(text: str) -> str | None:
     """Return a reason string if the tweet is non-predictive, else None."""
     lowered = text.lower()
 
-    if _is_non_claim(lowered):
-        return "non-claim (job/press)"
-    if _is_question(text):
-        return "question"
-    if _is_sarcastic(text):
-        return "sarcasm"
-    if _is_long_term_thesis(lowered):
-        return "long-term thesis"
-    if _is_position_disclosure(text):
-        return "position disclosure"
-    if _is_informational(lowered):
-        return "informational/analytical"
-    if _is_past_tense_recap(lowered):
-        return "past tense recap"
-
+    checks = [
+        (_is_non_claim(lowered), "non-claim (job/press)"),
+        (_is_question(text), "question"),
+        (_is_sarcastic(text), "sarcasm"),
+        (_is_long_term_thesis(lowered), "long-term thesis"),
+        (_is_position_disclosure(text), "position disclosure"),
+        (_is_informational(lowered), "informational/analytical"),
+        (_is_past_tense_recap(lowered), "past tense recap"),
+    ]
+    for matched, reason in checks:
+        if matched:
+            return reason
     return None
 
 

@@ -40,12 +40,22 @@ def _serialize_account(account) -> dict:
         "username": account.username,
         "is_bot": account.account_type != "human",
         "bot_reason": account.classification_reason,
-        "total_claims": account.total_claims,
-        "exaggerated_count": account.exaggerated_count,
-        "accurate_count": account.accurate_count,
-        "understated_count": account.understated_count,
-        "grifter_score": account.grifter_score,
-        "grifter_category": _grifter_category(account.grifter_score),
+        "naive": {
+            "total_claims": account.naive_total_claims,
+            "exaggerated_count": account.naive_exaggerated_count,
+            "accurate_count": account.naive_accurate_count,
+            "understated_count": account.naive_understated_count,
+            "grifter_score": account.naive_grifter_score,
+            "grifter_category": _grifter_category(account.naive_grifter_score),
+        },
+        "improved": {
+            "total_claims": account.improved_total_claims,
+            "exaggerated_count": account.improved_exaggerated_count,
+            "accurate_count": account.improved_accurate_count,
+            "understated_count": account.improved_understated_count,
+            "grifter_score": account.improved_grifter_score,
+            "grifter_category": _grifter_category(account.improved_grifter_score),
+        },
         "first_seen": account.first_seen.isoformat() if account.first_seen else None,
         "last_seen": account.last_seen.isoformat() if account.last_seen else None,
         "classified_at": account.classified_at.isoformat() if account.classified_at else None,
@@ -229,7 +239,7 @@ def accounts():
     """List accounts with credibility scores.
 
     Query params:
-      sort_by    — field to sort by (default "grifter_score")
+      sort_by    — field to sort by (default "naive_grifter_score")
       order      — "asc" or "desc" (default "desc")
       min_claims — minimum claims to include (default 5)
       account_type — optional filter: human, bot, garbage
@@ -237,7 +247,7 @@ def accounts():
       offset     — pagination offset (default 0)
     """
     try:
-        sort_by = request.args.get("sort_by", "grifter_score")
+        sort_by = request.args.get("sort_by", "naive_grifter_score")
         order = request.args.get("order", "desc")
         min_claims = int(request.args.get("min_claims", 5))
         limit = min(int(request.args.get("limit", 50)), 200)
@@ -466,9 +476,16 @@ def predict():
             if account:
                 account_info = {
                     "username": account.username,
-                    "grifter_score": account.grifter_score,
-                    "grifter_category": _grifter_category(account.grifter_score),
-                    "total_claims": account.total_claims,
+                    "naive": {
+                        "grifter_score": account.naive_grifter_score,
+                        "grifter_category": _grifter_category(account.naive_grifter_score),
+                        "total_claims": account.naive_total_claims,
+                    },
+                    "improved": {
+                        "grifter_score": account.improved_grifter_score,
+                        "grifter_category": _grifter_category(account.improved_grifter_score),
+                        "total_claims": account.improved_total_claims,
+                    },
                 }
         except Exception as e:
             logger.error(f"Account lookup in predict failed: {e}")

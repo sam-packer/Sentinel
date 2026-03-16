@@ -65,6 +65,7 @@ def load_labeled_claims(
         LEFT JOIN accounts a ON r.username = a.username
         WHERE (a.account_type IS NULL OR a.account_type = 'human')
           AND r.created_at >= r.scraped_at - INTERVAL '90 days'
+          AND r.price_change_pct IS NOT NULL
         ORDER BY r.created_at
     """
     columns, rows = db.execute_query(query)

@@ -111,11 +111,18 @@ class Account:
     username: str
     account_type: str = "human"  # "human", "bot", "garbage"
     classification_reason: str | None = None
-    total_claims: int = 0
-    exaggerated_count: int = 0
-    accurate_count: int = 0
-    understated_count: int = 0
-    grifter_score: float | None = None  # null if < 5 claims
+    # Naive labeler scores
+    naive_total_claims: int = 0
+    naive_exaggerated_count: int = 0
+    naive_accurate_count: int = 0
+    naive_understated_count: int = 0
+    naive_grifter_score: float | None = None
+    # Improved labeler scores
+    improved_total_claims: int = 0
+    improved_exaggerated_count: int = 0
+    improved_accurate_count: int = 0
+    improved_understated_count: int = 0
+    improved_grifter_score: float | None = None
     first_seen: datetime | None = None
     last_seen: datetime | None = None
     classified_at: datetime | None = None
