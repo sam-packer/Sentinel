@@ -651,7 +651,7 @@ def train(model_name: str, test_size: float, seed: int, tune: bool, labels: str)
     click.echo(f"Data: {split.train_size} train, {split.test_size} test")
 
     # Model directory: models/{name}/{labels}/
-    model_dir = MODEL_DIR / model.name / labels
+    model_dir = MODEL_DIR / model.name / f"{labels}_labeler"
 
     # Load saved hyperparameters unless --tune is passed
     saved_params = None
@@ -781,7 +781,7 @@ def evaluate(model_name: str, seed: int, test_size: float, labels: str):
     model = _get_model(model_name)
 
     # Load saved model from the label-specific directory
-    model_dir = MODEL_DIR / model.name / labels
+    model_dir = MODEL_DIR / model.name / f"{labels}_labeler"
     if not (model_dir / "model.json").exists():
         click.echo(
             f"No trained model found at {model_dir}/. "

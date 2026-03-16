@@ -44,13 +44,23 @@ def create_app(database_url: str | None = None) -> Flask:
 
     loaded_models = {}
     for name in MODEL_REGISTRY:
-        try:
-            loaded_models[name] = load_model(name)
-            logger.info(f"Loaded model: {name}")
-        except FileNotFoundError:
-            logger.info(f"No trained model for '{name}', skipping")
-        except ImportError as e:
-            logger.warning(f"Cannot load '{name}': missing dependency ({e})")
+        for labels in ("naive", "improved"):
+            key = f"{name}/{labels}_labeler"
+            try:
+                loaded_models[key] = load_model(name, labels=labels)
+                logger.info(f"Loaded model: {key}")
+            except FileNotFoundError:
+                logger.info(f"No trained model for '{key}', skipping")
+            except ImportError as e:
+                logger.warning(f"Cannot load '{key}': missing dependency ({e})")
+
+        # Fallback: try loading from flat directory (backward compat)
+        if not any(k.startswith(f"{name}/") for k in loaded_models):
+            try:
+                loaded_models[name] = load_model(name)
+                logger.info(f"Loaded model: {name} (legacy flat path)")
+            except (FileNotFoundError, ImportError):
+                pass
     app.config["MODELS"] = loaded_models
 
     # Register API routes

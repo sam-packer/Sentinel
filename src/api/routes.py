@@ -13,6 +13,10 @@ Endpoints:
   GET  /api/accounts/<username>  — Account detail + claim history
   GET  /api/leaderboard          — Top grifters / best signal accounts
   GET  /api/health               — Health check
+
+Common query parameters:
+  labels — Choose labeling method: "naive" (default) or "improved".
+           Controls which label set is used for claims, stats, and leaderboards.
 """
 
 import asyncio
@@ -60,6 +64,14 @@ def _serialize_account(account) -> dict:
         "last_seen": account.last_seen.isoformat() if account.last_seen else None,
         "classified_at": account.classified_at.isoformat() if account.classified_at else None,
     }
+
+
+def _parse_labels_param() -> str:
+    """Parse and validate the 'labels' query parameter."""
+    labels = request.args.get("labels", "naive")
+    if labels not in ("naive", "improved"):
+        return None
+    return labels
 
 
 def _grifter_category(score) -> str:
@@ -173,10 +185,14 @@ def feed():
     if label_filter and label_filter not in ("exaggerated", "accurate", "understated"):
         return jsonify({"error": "Invalid label filter"}), 400
 
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
         db = _get_db()
-        claims = db.get_feed(limit=limit, offset=offset, label=label_filter)
-        return jsonify({"claims": claims, "count": len(claims)})
+        claims = db.get_feed(limit=limit, offset=offset, label=label_filter, labels=labels)
+        return jsonify({"claims": claims, "count": len(claims), "labels": labels})
     except Exception as e:
         logger.error(f"Feed query failed: {e}")
         return jsonify({"error": "Database error"}), 500
@@ -190,13 +206,17 @@ def feed_stream():
     Emits new LabeledClaim as JSON whenever the scraper pipeline
     inserts a new row.
     """
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     def generate():
         db = _get_db()
-        last_id = db.get_latest_claim_id()
+        last_id = db.get_latest_claim_id(labels=labels)
 
         while True:
             try:
-                new_claims = db.get_claims_since(last_id) if last_id else []
+                new_claims = db.get_claims_since(last_id, labels=labels) if last_id else []
 
                 for claim in new_claims:
                     yield f"data: {json.dumps(claim)}\n\n"
@@ -226,9 +246,13 @@ def feed_stream():
 @api_bp.route("/stats", methods=["GET"])
 def stats():
     """Aggregate statistics about labeled claims."""
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
         db = _get_db()
-        return jsonify(db.get_stats())
+        return jsonify({**db.get_stats(labels=labels), "labels": labels})
     except Exception as e:
         logger.error(f"Stats query failed: {e}")
         return jsonify({"error": "Database error"}), 500
@@ -246,8 +270,13 @@ def accounts():
       limit      — max results (default 50)
       offset     — pagination offset (default 0)
     """
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
-        sort_by = request.args.get("sort_by", "naive_grifter_score")
+        default_sort = "improved_grifter_score" if labels == "improved" else "naive_grifter_score"
+        sort_by = request.args.get("sort_by", default_sort)
         order = request.args.get("order", "desc")
         min_claims = int(request.args.get("min_claims", 5))
         limit = min(int(request.args.get("limit", 50)), 200)
@@ -275,6 +304,7 @@ def accounts():
         return jsonify({
             "accounts": [_serialize_account(a) for a in account_list],
             "count": len(account_list),
+            "labels": labels,
         })
     except Exception as e:
         logger.error(f"Accounts query failed: {e}")
@@ -287,6 +317,10 @@ def account_detail(username):
 
     Returns account info plus their labeled claims.
     """
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
         db = _get_db()
         account = db.get_account(username)
@@ -298,9 +332,10 @@ def account_detail(username):
         return jsonify({"error": f"Account '{username}' not found"}), 404
 
     try:
-        claims = db.get_account_claims(username, limit=200, offset=0)
+        claims = db.get_account_claims(username, limit=200, offset=0, labels=labels)
         account_data = _serialize_account(account)
         account_data["claims"] = claims
+        account_data["labels"] = labels
         return jsonify(account_data)
     except Exception as e:
         logger.error(f"Account claims query failed: {e}")
@@ -328,6 +363,10 @@ def stock_feed(ticker):
 
     exclude_bots = request.args.get("exclude_bots", "true").lower() in ("true", "1", "yes")
 
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
         db = _get_db()
         claims = db.get_stock_feed(
@@ -335,11 +374,13 @@ def stock_feed(ticker):
             limit=limit,
             offset=offset,
             exclude_bots=exclude_bots,
+            labels=labels,
         )
         return jsonify({
             "claims": claims,
             "count": len(claims),
             "ticker": ticker,
+            "labels": labels,
         })
     except Exception as e:
         logger.error(f"Stock feed query failed: {e}")
@@ -353,12 +394,17 @@ def stock_stats(ticker):
     if ticker not in TICKER_NAMES:
         return jsonify({"error": f"Unknown ticker '{ticker}'"}), 404
 
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
         db = _get_db()
-        stock_data = db.get_stock_stats(ticker)
+        stock_data = db.get_stock_stats(ticker, labels=labels)
         return jsonify({
             "ticker": ticker,
             "company_name": TICKER_NAMES[ticker],
+            "labels": labels,
             **stock_data,
         })
     except Exception as e:
@@ -378,6 +424,10 @@ def leaderboard():
     if category not in ("grifters", "signal"):
         return jsonify({"error": "Invalid category, must be 'grifters' or 'signal'"}), 400
 
+    labels = _parse_labels_param()
+    if labels is None:
+        return jsonify({"error": "Invalid labels parameter, must be 'naive' or 'improved'"}), 400
+
     try:
         limit = min(int(request.args.get("limit", 20)), 100)
     except (ValueError, TypeError):
@@ -385,10 +435,11 @@ def leaderboard():
 
     try:
         db = _get_db()
-        account_list = db.get_leaderboard(category=category, limit=limit)
+        account_list = db.get_leaderboard(category=category, limit=limit, labels=labels)
         return jsonify({
             "category": category,
             "accounts": account_list,
+            "labels": labels,
         })
     except Exception as e:
         logger.error(f"Leaderboard query failed: {e}")
@@ -400,7 +451,10 @@ def leaderboard():
 def predict():
     """Predict a label for a tweet by URL.
 
-    Body: { "url": str, "model": str? }
+    Body: { "url": str, "model": str?, "labels": str? }
+    - model: Model key like "classical/naive", "neural/improved", or legacy "classical".
+    - labels: "naive" or "improved" (default "naive"). Used to select model when
+      only a base model name is given (e.g. "classical" → "classical/naive").
     Returns: { "label": str, "confidence": float, "model": str,
                "available_models": list, "account": dict | null }
     """
@@ -452,9 +506,13 @@ def predict():
         return jsonify({"error": "No trained models available. Run 'uv run train <model>' first."}), 503
 
     model_name = data.get("model")
+    labels = data.get("labels", "naive")
     available = list(models.keys())
 
     if model_name:
+        # If a bare model name is given (e.g. "classical"), try "{name}/{labels}" first
+        if model_name not in models and "/" not in model_name:
+            model_name = f"{model_name}/{labels}"
         if model_name not in models:
             return jsonify({
                 "error": f"Model '{model_name}' not available",

@@ -15,6 +15,13 @@ from .models import RawClaim, LabeledClaim, Account
 
 logger = logging.getLogger("sentinel.db")
 
+
+def _label_table(labels: str) -> str:
+    """Validate the labels parameter and return the corresponding table name."""
+    if labels not in ("naive", "improved"):
+        raise ValueError(f"Invalid labels: {labels!r} (must be 'naive' or 'improved')")
+    return f"{labels}_labeled_claims"
+
 # Exclude stale tweets where the tweet was created more than 90 days
 # before it was scraped. These are old results Twitter search returns
 # alongside current ones. A tweet from 2019 scraped in 2026 is noise.
@@ -353,6 +360,7 @@ class SentinelDB:
         limit: int = 50,
         offset: int = 0,
         label: str | None = None,
+        labels: str = "naive",
     ) -> list[dict]:
         """Get paginated labeled claims, newest first.
 
@@ -360,12 +368,14 @@ class SentinelDB:
             limit: Max results.
             offset: Pagination offset.
             label: Optional filter ("exaggerated", "accurate", "understated").
+            labels: Which label set to query ("naive" or "improved").
 
         Returns:
             List of claim dicts ready for JSON serialization.
         """
+        label_table = _label_table(labels)
         conn = self._get_conn()
-        query = """
+        query = f"""
             SELECT r.tweet_id, r.text, r.username, r.created_at,
                    r.likes, r.retweets, r.replies, r.views, r.hashtags,
                    r.ticker, r.company_name,
@@ -374,7 +384,7 @@ class SentinelDB:
                    r.posted_during_market_hours, r.volume_at_tweet,
                    l.label, l.claimed_direction, l.actual_direction,
                    l.exaggeration_score, l.news_summary, l.labeled_at
-            FROM naive_labeled_claims l
+            FROM {label_table} l
             JOIN raw_claims r ON r.tweet_id = l.tweet_id
         """
         params: list = []
@@ -407,8 +417,13 @@ class SentinelDB:
 
         return results
 
-    def get_stats(self) -> dict:
-        """Get aggregate statistics for the /api/stats endpoint."""
+    def get_stats(self, labels: str = "naive") -> dict:
+        """Get aggregate statistics for the /api/stats endpoint.
+
+        Args:
+            labels: Which label set to query ("naive" or "improved").
+        """
+        label_table = _label_table(labels)
         conn = self._get_conn()
         stats = {}
 
@@ -416,14 +431,14 @@ class SentinelDB:
             # Total claims
             cur.execute(f"""
                 SELECT COUNT(*) FROM raw_claims r
-                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
                 WHERE {FRESHNESS_FILTER}
             """)
             stats["total_claims"] = cur.fetchone()[0]
 
             # Label distribution
             cur.execute(f"""
-                SELECT l.label, COUNT(*) FROM naive_labeled_claims l
+                SELECT l.label, COUNT(*) FROM {label_table} l
                 JOIN raw_claims r ON r.tweet_id = l.tweet_id
                 WHERE {FRESHNESS_FILTER}
                 GROUP BY l.label
@@ -434,7 +449,7 @@ class SentinelDB:
             cur.execute(f"""
                 SELECT r.catalyst_type, COUNT(*)
                 FROM raw_claims r
-                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
                 WHERE r.catalyst_type IS NOT NULL AND {FRESHNESS_FILTER}
                 GROUP BY r.catalyst_type
             """)
@@ -444,7 +459,7 @@ class SentinelDB:
             cur.execute(f"""
                 SELECT r.ticker, COUNT(*) as cnt
                 FROM raw_claims r
-                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
                 WHERE {FRESHNESS_FILTER}
                 GROUP BY r.ticker ORDER BY cnt DESC LIMIT 10
             """)
@@ -456,7 +471,7 @@ class SentinelDB:
             cur.execute(f"""
                 SELECT r.username, COUNT(*) as cnt
                 FROM raw_claims r
-                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
                 WHERE l.label = 'exaggerated' AND {FRESHNESS_FILTER}
                 GROUP BY r.username ORDER BY cnt DESC LIMIT 10
             """)
@@ -472,7 +487,7 @@ class SentinelDB:
                        SUM(CASE WHEN l.label = 'exaggerated' THEN 1 ELSE 0 END) as exaggerated,
                        SUM(CASE WHEN l.label = 'understated' THEN 1 ELSE 0 END) as understated
                 FROM raw_claims r
-                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
                 WHERE {FRESHNESS_FILTER}
                 GROUP BY r.ticker ORDER BY total DESC
             """)
@@ -486,20 +501,31 @@ class SentinelDB:
 
         return stats
 
-    def get_latest_claim_id(self) -> int | None:
-        """Get the tweet_id of the most recently labeled claim (for SSE polling)."""
+    def get_latest_claim_id(self, labels: str = "naive") -> int | None:
+        """Get the tweet_id of the most recently labeled claim (for SSE polling).
+
+        Args:
+            labels: Which label set to query ("naive" or "improved").
+        """
+        label_table = _label_table(labels)
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT tweet_id FROM naive_labeled_claims ORDER BY labeled_at DESC LIMIT 1"
+                f"SELECT tweet_id FROM {label_table} ORDER BY labeled_at DESC LIMIT 1"
             )
             row = cur.fetchone()
             return row[0] if row else None
 
-    def get_claims_since(self, tweet_id: int) -> list[dict]:
-        """Get labeled claims newer than the given tweet_id (for SSE)."""
+    def get_claims_since(self, tweet_id: int, labels: str = "naive") -> list[dict]:
+        """Get labeled claims newer than the given tweet_id (for SSE).
+
+        Args:
+            tweet_id: The tweet_id to fetch claims after.
+            labels: Which label set to query ("naive" or "improved").
+        """
+        label_table = _label_table(labels)
         conn = self._get_conn()
-        query = """
+        query = f"""
             SELECT r.tweet_id, r.text, r.username, r.created_at,
                    r.likes, r.retweets, r.replies, r.views, r.hashtags,
                    r.ticker, r.company_name,
@@ -508,10 +534,10 @@ class SentinelDB:
                    r.posted_during_market_hours, r.volume_at_tweet,
                    l.label, l.claimed_direction, l.actual_direction,
                    l.exaggeration_score, l.news_summary, l.labeled_at
-            FROM naive_labeled_claims l
+            FROM {label_table} l
             JOIN raw_claims r ON r.tweet_id = l.tweet_id
             WHERE l.labeled_at > (
-                SELECT labeled_at FROM naive_labeled_claims WHERE tweet_id = %s
+                SELECT labeled_at FROM {label_table} WHERE tweet_id = %s
             )
             ORDER BY l.labeled_at ASC
         """
@@ -708,10 +734,19 @@ class SentinelDB:
         username: str,
         limit: int = 50,
         offset: int = 0,
+        labels: str = "naive",
     ) -> list[dict]:
-        """Get paginated labeled claims for a specific account."""
+        """Get paginated labeled claims for a specific account.
+
+        Args:
+            username: Twitter handle.
+            limit: Max results.
+            offset: Pagination offset.
+            labels: Which label set to query ("naive" or "improved").
+        """
+        label_table = _label_table(labels)
         conn = self._get_conn()
-        query = """
+        query = f"""
             SELECT r.tweet_id, r.text, r.username, r.created_at,
                    r.likes, r.retweets, r.replies, r.views, r.hashtags,
                    r.ticker, r.company_name,
@@ -720,7 +755,7 @@ class SentinelDB:
                    r.posted_during_market_hours, r.volume_at_tweet,
                    l.label, l.claimed_direction, l.actual_direction,
                    l.exaggeration_score, l.news_summary, l.labeled_at
-            FROM naive_labeled_claims l
+            FROM {label_table} l
             JOIN raw_claims r ON r.tweet_id = l.tweet_id
             WHERE r.username = %s
             ORDER BY l.labeled_at DESC
@@ -750,10 +785,20 @@ class SentinelDB:
         limit: int = 50,
         offset: int = 0,
         exclude_bots: bool = True,
+        labels: str = "naive",
     ) -> list[dict]:
-        """Get paginated labeled claims for a specific ticker."""
+        """Get paginated labeled claims for a specific ticker.
+
+        Args:
+            ticker: Stock ticker symbol.
+            limit: Max results.
+            offset: Pagination offset.
+            exclude_bots: If True, exclude bot/garbage accounts.
+            labels: Which label set to query ("naive" or "improved").
+        """
+        label_table = _label_table(labels)
         conn = self._get_conn()
-        query = """
+        query = f"""
             SELECT r.tweet_id, r.text, r.username, r.created_at,
                    r.likes, r.retweets, r.replies, r.views, r.hashtags,
                    r.ticker, r.company_name,
@@ -763,7 +808,7 @@ class SentinelDB:
                    l.label, l.claimed_direction, l.actual_direction,
                    l.exaggeration_score, l.news_summary, l.labeled_at,
                    a.grifter_score
-            FROM naive_labeled_claims l
+            FROM {label_table} l
             JOIN raw_claims r ON r.tweet_id = l.tweet_id
             LEFT JOIN accounts a ON r.username = a.username
             WHERE r.ticker = %s AND {FRESHNESS_FILTER}
@@ -792,8 +837,14 @@ class SentinelDB:
             results.append(d)
         return results
 
-    def get_stock_stats(self, ticker: str) -> dict:
-        """Get aggregate statistics for a specific ticker."""
+    def get_stock_stats(self, ticker: str, labels: str = "naive") -> dict:
+        """Get aggregate statistics for a specific ticker.
+
+        Args:
+            ticker: Stock ticker symbol.
+            labels: Which label set to query ("naive" or "improved").
+        """
+        label_table = _label_table(labels)
         conn = self._get_conn()
         stats: dict = {"ticker": ticker}
 
@@ -806,7 +857,7 @@ class SentinelDB:
                        SUM(CASE WHEN l.label = 'accurate' THEN 1 ELSE 0 END) as accurate,
                        SUM(CASE WHEN l.label = 'understated' THEN 1 ELSE 0 END) as understated
                 FROM raw_claims r
-                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
                 WHERE r.ticker = %s AND {FRESHNESS_FILTER}
                 """,
                 (ticker,),
@@ -829,7 +880,7 @@ class SentinelDB:
                 f"""
                 SELECT r.catalyst_type, COUNT(*) as cnt
                 FROM raw_claims r
-                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
                 WHERE r.ticker = %s AND r.catalyst_type IS NOT NULL
                   AND {FRESHNESS_FILTER}
                 GROUP BY r.catalyst_type
@@ -847,7 +898,7 @@ class SentinelDB:
                 f"""
                 SELECT AVG(r.price_change_pct)
                 FROM raw_claims r
-                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
                 WHERE r.ticker = %s AND r.price_change_pct IS NOT NULL
                   AND {FRESHNESS_FILTER}
                 """,
@@ -861,7 +912,7 @@ class SentinelDB:
                 f"""
                 SELECT r.username, COUNT(*) as cnt
                 FROM raw_claims r
-                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
                 WHERE r.ticker = %s AND {FRESHNESS_FILTER}
                 GROUP BY r.username
                 ORDER BY cnt DESC
