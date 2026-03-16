@@ -300,6 +300,7 @@ def accounts():
             account_type=account_type,
             limit=limit,
             offset=offset,
+            labels=labels,
         )
         return jsonify({
             "accounts": [_serialize_account(a) for a in account_list],

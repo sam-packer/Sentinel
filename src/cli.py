@@ -829,14 +829,18 @@ def evaluate(model_name: str, seed: int, test_size: float, labels: str):
 @click.command()
 @click.argument("model_name")
 @click.argument("text")
-def predict(model_name: str, text: str):
+@click.option("--naive", "labels", flag_value="naive", default="naive",
+              help="Use model trained on naive labels")
+@click.option("--improved", "labels", flag_value="improved",
+              help="Use model trained on improved labels")
+def predict(model_name: str, text: str, labels: str):
     """Predict a label for tweet text. Usage: uv run predict baseline "tweet text" """
     _init()
 
     from .models import load_model
 
     try:
-        model = load_model(model_name)
+        model = load_model(model_name, labels=labels)
     except KeyError as e:
         click.echo(str(e), err=True)
         sys.exit(1)

@@ -404,6 +404,7 @@ async def run_collection(
     since: datetime | None = None,
     until: datetime | None = None,
     daily: bool = False,
+    labeler: str = "naive",
 ) -> None:
     """Run the full collection pipeline with status tracking."""
     from .data.db import SentinelDB
@@ -536,7 +537,7 @@ async def run_collection(
             _classify_new_accounts(claims, db, status, name)
 
         # 6. Enrich + label
-        await _enrich_and_label(claims, db, status, name, is_shutdown)
+        await _enrich_and_label(claims, db, status, name, is_shutdown, labeler=labeler)
 
         if db:
             db.close()
@@ -605,7 +606,7 @@ async def run_enrichment(
 
         claims = db.get_raw_claims(
             tickers=tickers, since=since, until=until,
-            unlabeled_only=unlabeled_only,
+            unlabeled_only=unlabeled_only, labels=labeler,
         )
 
         if not claims:

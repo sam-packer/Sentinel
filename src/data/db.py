@@ -180,6 +180,7 @@ class SentinelDB:
         since: "datetime | None" = None,
         until: "datetime | None" = None,
         unlabeled_only: bool = False,
+        labels: str = "naive",
     ) -> list[RawClaim]:
         """Fetch raw claims from the database for re-enrichment.
 
@@ -187,7 +188,9 @@ class SentinelDB:
             tickers: Only return claims for these tickers. None = all.
             since: Only return claims created after this time.
             until: Only return claims created before this time.
-            unlabeled_only: If True, only return claims without a naive_labeled_claims row.
+            unlabeled_only: If True, only return claims without a row in the
+                table corresponding to *labels* (``"naive"`` or ``"improved"``).
+            labels: Which label set to check for unlabeled filtering.
         """
         conn = self._get_conn()
         query = "SELECT * FROM raw_claims"
@@ -195,8 +198,9 @@ class SentinelDB:
         params: list = []
 
         if unlabeled_only:
+            table = _label_table(labels)
             conditions.append(
-                "tweet_id NOT IN (SELECT tweet_id FROM naive_labeled_claims)"
+                f"tweet_id NOT IN (SELECT tweet_id FROM {table})"
             )
         if tickers:
             conditions.append("ticker = ANY(%s)")
@@ -609,18 +613,20 @@ class SentinelDB:
         account_type: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        labels: str = "naive",
     ) -> list[Account]:
         """Get paginated, filterable, sortable account list."""
+        default_sort = f"{labels}_grifter_score"
         allowed_sort = {
             "naive_grifter_score", "improved_grifter_score",
             "naive_total_claims", "improved_total_claims",
             "username", "last_seen",
         }
         if sort_by not in allowed_sort:
-            sort_by = "naive_grifter_score"
+            sort_by = default_sort
         order_dir = "ASC" if order.lower() == "asc" else "DESC"
 
-        query = "SELECT * FROM accounts WHERE naive_total_claims >= %s"
+        query = f"SELECT * FROM accounts WHERE {labels}_total_claims >= %s"
         params: list = [min_claims]
 
         if account_type is not None:
