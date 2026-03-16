@@ -17,18 +17,21 @@ from pathlib import Path
 
 import numpy as np
 import optuna
+from sklearn.metrics import f1_score
+from sklearn.model_selection import StratifiedKFold
+
 try:
     import torch
     import transformers
     from torch import nn
     from torch.utils.data import DataLoader, Dataset
     from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
-    _TORCH_IMPORT_ERROR = None
-except ImportError as _torch_err:
+    _TORCH_AVAILABLE = True
+except ImportError:
     torch = None
-    _TORCH_IMPORT_ERROR = _torch_err
-from sklearn.metrics import f1_score
-from sklearn.model_selection import StratifiedKFold
+    nn = None
+    Dataset = object
+    _TORCH_AVAILABLE = False
 
 from . import BaseModel
 
@@ -40,7 +43,7 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 logging.getLogger("transformers").setLevel(logging.ERROR)
-if torch is not None:
+if _TORCH_AVAILABLE:
     transformers.logging.set_verbosity_error()
     transformers.logging.disable_progress_bar()
 
@@ -56,6 +59,15 @@ LABEL2ID = {"accurate": 0, "exaggerated": 1}
 ID2LABEL = {v: k for k, v in LABEL2ID.items()}
 
 
+def _require_torch() -> None:
+    """Raise ImportError if torch is not available."""
+    if not _TORCH_AVAILABLE:
+        raise ImportError(
+            "PyTorch is required for the neural model. "
+            "Install with: uv add torch transformers"
+        )
+
+
 def _seed_everything(seed: int = SEED) -> None:
     """Set seeds for reproducibility."""
     torch.manual_seed(seed)
@@ -66,7 +78,7 @@ def _seed_everything(seed: int = SEED) -> None:
     torch.backends.cudnn.benchmark = False
 
 
-def _get_device() -> torch.device:
+def _get_device():
     """Detect best available device."""
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -97,7 +109,7 @@ class TweetDataset(Dataset):
         }
 
 
-def _compute_class_weights(labels: list[int], device: torch.device) -> torch.Tensor:
+def _compute_class_weights(labels: list[int], device):
     """Compute inverse-frequency class weights for balanced loss."""
     counts = np.bincount(labels)
     weights = len(labels) / (len(counts) * counts)
@@ -110,7 +122,7 @@ def _train_one_fold(
     val_texts: list[str],
     val_labels: list[int],
     params: dict,
-    device: torch.device,
+    device,
     tokenizer,
 ) -> float:
     """Train on one CV fold, return validation macro F1."""
@@ -221,7 +233,7 @@ def _tune_neural(
     texts: list[str],
     labels: list[int],
     n_trials: int,
-    device: torch.device,
+    device,
     tokenizer,
 ) -> dict:
     """Tune BERTweet hyperparameters with Optuna."""
@@ -289,14 +301,9 @@ class NeuralModel(BaseModel):
     """Fine-tuned BERTweet for tweet exaggeration classification."""
 
     def __init__(self):
-        if torch is None:
-            raise ImportError(
-                "NeuralModel requires PyTorch and transformers. "
-                "Install with: uv sync --extra cuda"
-            ) from _TORCH_IMPORT_ERROR
         self._model = None
         self._tokenizer = None
-        self._device: torch.device | None = None
+        self._device = None
         self._training_meta: dict = {}
 
     @property
@@ -311,6 +318,7 @@ class NeuralModel(BaseModel):
         n_trials: int = 50,
         saved_params: dict | None = None,
     ) -> dict:
+        _require_torch()
         self._device = _get_device()
         logger.info(f"Device: {self._device}")
 
@@ -554,6 +562,7 @@ class NeuralModel(BaseModel):
         logger.info(f"Saved to {directory}")
 
     def load(self, directory: Path) -> None:
+        _require_torch()
         self._device = _get_device()
 
         model_dir = directory / "model"
