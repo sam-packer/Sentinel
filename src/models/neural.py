@@ -10,6 +10,8 @@ and macro F1 as the objective — same evaluation framework as the
 classical model for fair comparison.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
