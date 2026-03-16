@@ -50,12 +50,12 @@ automatically during collection — each account is classified once and the resu
 The classifier receives the account's username and up to 5 sample tweets, then categorizes it as one of:
 
 - **human** — real person sharing opinions or analysis
-- **news_ticker** — automated account reposting headlines verbatim
-- **repost_bot** — account that copies or auto-generates content
-- **spam_bot** — spam, scam, or irrelevant promotional content
+- **bot** — automated account reposting headlines, copying content, or auto-generating posts
+- **garbage** — spam, scam, or irrelevant promotional content
 
-Bot accounts are filtered out before enrichment. This saves API calls (no point enriching bot tweets with price/news
-data) and ensures the ML models train only on human opinions.
+All tweets are enriched regardless of account type. Human-only filtering happens downstream in the training data loader,
+so bot and garbage tweets still get price/news data (useful for analysis) but are excluded from ML training and grifter
+scoring.
 
 Requires `ANTHROPIC_API_KEY` in `.env`. If not set or if bot detection is disabled in config, this step is skipped and
 all accounts are treated as human.
@@ -98,7 +98,7 @@ The priority ordering matters: a headline mentioning both a "Pentagon contract" 
 ### Stage 5: Label
 
 Two independent labelers run on the same enriched tweets, writing to separate tables. Both are rule-based (no ML in the
-labeling step). You choose which to run with `--naive` or `--improved`.
+labeling step). The enrichment loop fetches price and news once per tweet, then runs both labelers in a single pass.
 
 **Naive labeler** (`src/data/labeler.py` → `naive_labeled_claims`): keyword/emoji matching for claimed direction, fixed
 2% exaggeration threshold for all tickers. Simple and interpretable but can't handle negation, sarcasm, or non-claims.
@@ -133,6 +133,10 @@ with a Pentagon contract headline behind it is more credible than the same tweet
 These three components sum to a maximum of 1.0. Because they're additive and independent, you can explain exactly why
 any tweet scored what it did. For example, a score of 0.62 might break down as: 0.5 for wrong direction + 0.09 for
 moderate language + 0.03 for weak catalyst backing.
+
+The above describes the naive labeler's scoring. The improved labeler has its own exaggeration score function
+(`_compute_exaggeration_score_improved`) where the magnitude gap scales to 3x the ticker's median daily move instead of
+a fixed 5%.
 
 ## Claim data model
 
@@ -173,22 +177,24 @@ Labeling fields:
 | Field                | Description                                                                          |
 |----------------------|--------------------------------------------------------------------------------------|
 | `claimed_direction`  | Parsed from tweet text: `up`, `down`, or `neutral`.                                  |
-| `actual_direction`   | From price change: above +0.5% is `up`, below -0.5% is `down`, otherwise `neutral`.  |
+| `actual_direction`   | From price change: above +0.5% is `up`, below -0.5% is `down`, otherwise `neutral` (naive labeler). The improved labeler uses per-ticker thresholds for direction classification. |
 | `label`              | Final verdict: `exaggerated`, `accurate`, or `understated`.                          |
 | `exaggeration_score` | 0.0 (accurate) to 1.0 (completely wrong). More granular than the three-bucket label. |
 | `news_summary`       | First headline from `news_headlines`, used for display.                              |
 
 Account fields (stored in `accounts` table):
 
-| Field               | Description                                                                 |
-|---------------------|-----------------------------------------------------------------------------|
-| `username`          | Twitter handle. Primary key.                                                |
-| `is_bot`            | Whether the account is a bot (classified by LLM-as-judge).                  |
-| `bot_reason`        | Why the account was classified as bot/human. Includes type and explanation. |
-| `total_claims`      | Total labeled claims from this account.                                     |
-| `exaggerated_count` | How many claims were labeled exaggerated.                                   |
-| `accurate_count`    | How many claims were labeled accurate.                                      |
-| `grifter_score`     | Ratio of exaggerated to total claims. Null if fewer than 5 claims.          |
+| Field                        | Description                                                                              |
+|------------------------------|------------------------------------------------------------------------------------------|
+| `username`                   | Twitter handle. Primary key.                                                             |
+| `account_type`               | Account classification: `human`, `bot`, or `garbage` (classified by LLM-as-judge).       |
+| `classification_reason`      | Why the account was classified this way. Includes type and explanation.                   |
+| `naive_total_claims`         | Total labeled claims from this account (naive labeler).                                  |
+| `naive_exaggerated_count`    | How many claims were labeled exaggerated (naive labeler).                                |
+| `naive_grifter_score`        | Ratio of exaggerated to total claims (naive labeler). Null if fewer than 5 claims.       |
+| `improved_total_claims`      | Total labeled claims from this account (improved labeler).                               |
+| `improved_exaggerated_count` | How many claims were labeled exaggerated (improved labeler).                             |
+| `improved_grifter_score`     | Ratio of exaggerated to total claims (improved labeler). Null if fewer than 5 claims.    |
 
 ## Commands
 
@@ -205,7 +211,8 @@ uv run setup
 
 Scrapes tweets about defense stocks, enriches them with price and news data, labels them, and stores results in
 PostgreSQL. Each day is scraped independently for even temporal distribution. Only tweets older than 25 hours are
-processed so the 24h price window has elapsed.
+processed so the 24h price window has elapsed. Always runs both labelers (naive and improved) — there are no flags to
+choose one.
 
 ```bash
 uv run collect                              # yesterday's tweets, 50 per ticker
@@ -219,15 +226,17 @@ uv run collect --stop                       # stop background collection
 
 ### enrich
 
-Re-enriches existing raw claims with fresh price and news data. Requires `--naive` or `--improved` to choose a labeler.
+Re-enriches existing raw claims with fresh price and news data. Runs both labelers by default. Use `--naive` or
+`--improved` to run only one.
 
 ```bash
-uv run enrich --naive              # enrich with naive labeler → naive_labeled_claims
-uv run enrich --improved           # enrich with improved labeler → improved_labeled_claims
-uv run enrich --naive --days 7     # only claims from the last 7 days
-uv run enrich --naive --unlabeled  # only claims missing labels
-uv run enrich --naive --rejudge    # reclassify ALL accounts via LLM before enriching
-uv run enrich --naive --background # run in background
+uv run enrich                      # enrich with both labelers
+uv run enrich --naive              # enrich with naive labeler only → naive_labeled_claims
+uv run enrich --improved           # enrich with improved labeler only → improved_labeled_claims
+uv run enrich --days 7             # only claims from the last 7 days
+uv run enrich --unlabeled          # only claims missing labels
+uv run enrich --rejudge            # reclassify ALL accounts via LLM before enriching
+uv run enrich --background         # run in background
 uv run enrich --status             # check background progress
 uv run enrich --stop               # stop background enrichment
 ```
@@ -267,47 +276,48 @@ Available models:
 - `neural` — Fine-tuned BERTweet (vinai/bertweet-base). 50 Optuna trials with stratified 3-fold CV optimizing macro F1.
   Tunes learning rate, weight decay, warmup, epochs, batch size, and dropout. Requires GPU.
 
-Requires `--naive` or `--improved` to specify which label set to train on.
+Runs on both label sets by default. Use `--naive` or `--improved` to train on only one.
 
 ```bash
-uv run train baseline --naive          # majority-class baseline on naive labels
-uv run train classical --naive --tune  # TF-IDF + LR on naive labels, run Optuna tuning
-uv run train classical --improved      # TF-IDF + LR on improved labels (reuse saved params)
-uv run train neural --naive --tune     # BERTweet on naive labels (requires GPU)
-uv run train neural --improved --tune  # BERTweet on improved labels (requires GPU)
+uv run train baseline                  # majority-class baseline on both label sets
+uv run train classical --tune          # TF-IDF + LR on both label sets, run Optuna tuning
+uv run train classical --naive --tune  # TF-IDF + LR on naive labels only, run Optuna tuning
+uv run train classical --improved      # TF-IDF + LR on improved labels only (reuse saved params)
+uv run train neural --naive --tune     # BERTweet on naive labels only (requires GPU)
+uv run train neural --improved --tune  # BERTweet on improved labels only (requires GPU)
 ```
 
-Model artifacts are saved to `models/<name>/<naive|improved>/`:
+Model artifacts are saved to `models/<name>/<naive_labeler|improved_labeler>/`:
 
 ```
 models/
 ├── baseline/
-│   ├── naive/
+│   ├── naive_labeler/
 │   │   ├── model.json          # majority class + class counts
 │   │   ├── report.md           # full markdown evaluation report
 │   │   ├── evaluation.json     # machine-readable metrics
 │   │   └── mispredictions.json # every test set error with full context
-│   └── improved/
+│   └── improved_labeler/
 │       └── ...
 ├── classical/
-│   ├── naive/
+│   ├── naive_labeler/
 │   │   ├── lr.pkl              # logistic regression weights
 │   │   ├── tfidf.pkl           # TF-IDF vectorizer
 │   │   ├── model.json          # hyperparams, top predictive words
 │   │   ├── report.md
 │   │   ├── evaluation.json
 │   │   └── mispredictions.json
-│   └── improved/
+│   └── improved_labeler/
 │       └── ...
 └── neural/
-    ├── naive/
+    ├── naive_labeler/
     │   ├── model/              # BERTweet fine-tuned weights
     │   ├── tokenizer/          # BERTweet tokenizer files
     │   ├── model.json
     │   ├── report.md
     │   ├── evaluation.json
     │   └── mispredictions.json
-    └── improved/
+    └── improved_labeler/
         └── ...
 ```
 
@@ -316,12 +326,13 @@ models/
 Evaluates a previously trained model on the test set. Uses the same seed and split as training so the test data
 matches. Reports accuracy, per-class precision/recall/F1, and confusion matrix.
 
-Requires `--naive` or `--improved` to match the label set used during training.
+Runs on both label sets by default. Use `--naive` or `--improved` to evaluate on only one.
 
 ```bash
-uv run evaluate baseline --naive       # evaluate baseline on naive test set
-uv run evaluate classical --improved   # evaluate classical on improved test set
-uv run evaluate neural --naive         # evaluate neural on naive test set
+uv run evaluate baseline               # evaluate baseline on both label sets
+uv run evaluate classical --naive      # evaluate classical on naive test set only
+uv run evaluate classical --improved   # evaluate classical on improved test set only
+uv run evaluate neural --naive         # evaluate neural on naive test set only
 ```
 
 ### predict
@@ -330,9 +341,9 @@ Runs inference on tweet text using a trained model. No price or news data needed
 before the 24h price window elapses.
 
 ```bash
-uv run predict baseline '$LMT to the moon! 🚀🚀🚀'
-uv run predict classical 'RTX awarded massive Pentagon contract'
-uv run predict neural 'defense stocks looking weak here'
+uv run predict baseline '$LMT to the moon! 🚀🚀🚀'                  # uses naive labeler model by default
+uv run predict classical --improved 'RTX awarded massive Pentagon contract'  # use improved labeler model
+uv run predict neural --naive 'defense stocks looking weak here'             # explicitly use naive labeler model
 ```
 
 Also available as an API endpoint at `POST /api/predict`. See [docs/api.md](docs/api.md).

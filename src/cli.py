@@ -15,6 +15,11 @@ Usage:
   uv run enrich --background          — Run enrichment in background
   uv run enrich --status              — Check enrichment progress
   uv run enrich --stop                — Stop background enrichment
+  uv run train baseline               — Train on both label sets (default)
+  uv run train classical --naive      — Train on naive labels only
+  uv run train neural --tune          — Train with Optuna tuning
+  uv run evaluate classical           — Evaluate on both label sets
+  uv run predict classical "text"     — Predict a label
   uv run serve                        — Start API server
 """
 
@@ -616,24 +621,35 @@ def _get_model(name: str):
 @click.option("--seed", default=42, type=int, help="Random seed for train/test split")
 @click.option("--tune", is_flag=True, help="Run Optuna hyperparameter tuning (default: reuse saved params)")
 @click.option("--naive", "labels", flag_value="naive",
-              help="Train on naive labels")
+              help="Only train on naive labels")
 @click.option("--improved", "labels", flag_value="improved",
-              help="Train on improved labels")
-def train(model_name: str, test_size: float, seed: int, tune: bool, labels: str):
-    """Train a model. Requires --naive or --improved to specify label set."""
+              help="Only train on improved labels")
+def train(model_name: str, test_size: float, seed: int, tune: bool, labels: str | None):
+    """Train a model. Runs on both label sets by default. Use --naive or --improved for one."""
     _init()
-
-    if labels is None:
-        click.echo("Error: specify --naive or --improved to choose a label set.", err=True)
-        sys.exit(1)
 
     if not config.database.url:
         click.echo("Error: DATABASE_URL not set.", err=True)
         sys.exit(1)
 
+    label_sets = [labels] if labels else ["naive", "improved"]
+
+    for current_labels in label_sets:
+        if len(label_sets) > 1:
+            click.echo(f"\n{'='*60}")
+            click.echo(f"Training {model_name} on {current_labels} labels")
+            click.echo(f"{'='*60}")
+
+        _train_single(model_name, current_labels, test_size, seed, tune)
+
+
+def _train_single(model_name: str, labels: str, test_size: float, seed: int, tune: bool):
+    """Train a single model on a single label set."""
     import json
+    import random as _random
+
     from .data.db import SentinelDB
-    from .models.data import load_labeled_claims, prepare_split
+    from .models.data import EXCLUDE_LABELS, load_labeled_claims, prepare_split
     from .models.evaluate import compute_metrics, format_metrics, format_report
 
     label_table = f"{labels}_labeled_claims"
@@ -647,14 +663,14 @@ def train(model_name: str, test_size: float, seed: int, tune: bool, labels: str)
     db.close()
 
     if not claims:
-        click.echo(f"No claims found in {label_table}. Run 'uv run enrich --{labels}' first.", err=True)
-        sys.exit(1)
+        click.echo(f"No claims found in {label_table}. Run 'uv run enrich' first.", err=True)
+        return
 
     # Split
     split = prepare_split(claims, test_size=test_size, seed=seed)
     click.echo(f"Data: {split.train_size} train, {split.test_size} test")
 
-    # Model directory: models/{name}/{labels}/
+    # Model directory: models/{name}/{labels}_labeler/
     model_dir = MODEL_DIR / model.name / f"{labels}_labeler"
 
     # Load saved hyperparameters unless --tune is passed
@@ -686,9 +702,6 @@ def train(model_name: str, test_size: float, seed: int, tune: bool, labels: str)
     metrics = compute_metrics(predictions, split.test_labels)
 
     # Collect mispredictions with full context while everything is in memory
-    from .models.data import EXCLUDE_LABELS
-    import random as _random
-
     filtered_claims = [c for c in claims if c["label"] not in EXCLUDE_LABELS]
     rng = _random.Random(seed)
     rng.shuffle(filtered_claims)
@@ -761,22 +774,32 @@ def train(model_name: str, test_size: float, seed: int, tune: bool, labels: str)
 @click.option("--seed", default=42, type=int, help="Random seed (must match training)")
 @click.option("--test-size", default=0.2, type=float, help="Test fraction (must match training)")
 @click.option("--naive", "labels", flag_value="naive",
-              help="Evaluate against naive labels")
+              help="Only evaluate against naive labels")
 @click.option("--improved", "labels", flag_value="improved",
-              help="Evaluate against improved labels")
-def evaluate(model_name: str, seed: int, test_size: float, labels: str):
-    """Evaluate a trained model. Requires --naive or --improved to specify label set."""
+              help="Only evaluate against improved labels")
+def evaluate(model_name: str, seed: int, test_size: float, labels: str | None):
+    """Evaluate a trained model. Runs on both label sets by default."""
     _init()
-
-    if labels is None:
-        click.echo("Error: specify --naive or --improved to choose a label set.", err=True)
-        sys.exit(1)
 
     if not config.database.url:
         click.echo("Error: DATABASE_URL not set.", err=True)
         sys.exit(1)
 
+    label_sets = [labels] if labels else ["naive", "improved"]
+
+    for current_labels in label_sets:
+        if len(label_sets) > 1:
+            click.echo(f"\n{'='*60}")
+            click.echo(f"Evaluating {model_name} on {current_labels} labels")
+            click.echo(f"{'='*60}")
+
+        _evaluate_single(model_name, current_labels, seed, test_size)
+
+
+def _evaluate_single(model_name: str, labels: str, seed: int, test_size: float):
+    """Evaluate a single model on a single label set."""
     import json
+
     from .data.db import SentinelDB
     from .models.data import load_labeled_claims, prepare_split
     from .models.evaluate import compute_metrics, format_metrics
@@ -787,12 +810,8 @@ def evaluate(model_name: str, seed: int, test_size: float, labels: str):
     # Load saved model from the label-specific directory
     model_dir = MODEL_DIR / model.name / f"{labels}_labeler"
     if not (model_dir / "model.json").exists():
-        click.echo(
-            f"No trained model found at {model_dir}/. "
-            f"Run 'uv run train {model_name} --{labels}' first.",
-            err=True,
-        )
-        sys.exit(1)
+        click.echo(f"No trained model at {model_dir}/. Run 'uv run train {model_name}' first.", err=True)
+        return
 
     model.load(model_dir)
 
