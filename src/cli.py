@@ -362,8 +362,8 @@ def collect(
               help="Only enrich claims from the last N days")
 @click.option("--unlabeled", is_flag=True, help="Only enrich claims that haven't been labeled yet")
 @click.option("--rejudge", is_flag=True, help="Reclassify ALL accounts, not just unclassified ones")
-@click.option("--naive", "labeler", flag_value="naive", default=True,
-              help="Use naive (keyword-based) labeler (default)")
+@click.option("--naive", "labeler", flag_value="naive",
+              help="Use naive (keyword-based) labeler")
 @click.option("--improved", "labeler", flag_value="improved",
               help="Use improved (NLP-enhanced) labeler")
 @click.option("--background", is_flag=True, help="Run in background")
@@ -383,7 +383,10 @@ def enrich(
     _daemonized: bool,
     _labeler: str | None,
 ):
-    """Re-enrich existing raw claims with fresh price and news data."""
+    """Re-enrich existing raw claims with fresh price and news data.
+
+    Requires --naive or --improved to specify which labeler to use.
+    """
     _init()
 
     # When launched as a background subprocess, use the hidden --_labeler flag
@@ -397,6 +400,10 @@ def enrich(
     if do_stop:
         _stop_background("enrich")
         return
+
+    if labeler is None:
+        click.echo("Error: specify --naive or --improved to choose a labeler.", err=True)
+        sys.exit(1)
 
     if not config.database.url:
         click.echo("Error: DATABASE_URL not set. Enrich reads from the database.", err=True)
@@ -604,13 +611,17 @@ def _get_model(name: str):
 @click.option("--test-size", default=0.2, type=float, help="Fraction held out for testing (default: 0.2)")
 @click.option("--seed", default=42, type=int, help="Random seed for train/test split")
 @click.option("--tune", is_flag=True, help="Run Optuna hyperparameter tuning (default: reuse saved params)")
-@click.option("--naive", "labels", flag_value="naive", default=True,
-              help="Train on naive labels (default)")
+@click.option("--naive", "labels", flag_value="naive",
+              help="Train on naive labels")
 @click.option("--improved", "labels", flag_value="improved",
               help="Train on improved labels")
 def train(model_name: str, test_size: float, seed: int, tune: bool, labels: str):
-    """Train a model. Usage: uv run train baseline [--naive|--improved]"""
+    """Train a model. Requires --naive or --improved to specify label set."""
     _init()
+
+    if labels is None:
+        click.echo("Error: specify --naive or --improved to choose a label set.", err=True)
+        sys.exit(1)
 
     if not config.database.url:
         click.echo("Error: DATABASE_URL not set.", err=True)
@@ -745,13 +756,17 @@ def train(model_name: str, test_size: float, seed: int, tune: bool, labels: str)
 @click.argument("model_name")
 @click.option("--seed", default=42, type=int, help="Random seed (must match training)")
 @click.option("--test-size", default=0.2, type=float, help="Test fraction (must match training)")
-@click.option("--naive", "labels", flag_value="naive", default=True,
-              help="Evaluate against naive labels (default)")
+@click.option("--naive", "labels", flag_value="naive",
+              help="Evaluate against naive labels")
 @click.option("--improved", "labels", flag_value="improved",
               help="Evaluate against improved labels")
 def evaluate(model_name: str, seed: int, test_size: float, labels: str):
-    """Evaluate a trained model. Usage: uv run evaluate baseline [--naive|--improved]"""
+    """Evaluate a trained model. Requires --naive or --improved to specify label set."""
     _init()
+
+    if labels is None:
+        click.echo("Error: specify --naive or --improved to choose a label set.", err=True)
+        sys.exit(1)
 
     if not config.database.url:
         click.echo("Error: DATABASE_URL not set.", err=True)
