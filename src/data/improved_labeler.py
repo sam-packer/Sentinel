@@ -1,6 +1,10 @@
 """
 Improved claim labeling engine for Sentinel.
 
+All labeling thresholds are statistical — expressed as multiples of each
+ticker's median absolute daily move (computed from yfinance market data).
+There are zero fixed percentage thresholds anywhere in this module.
+
 Addresses the top failure modes found in error analysis of the naive labeler
 (137 mispredictions):
 
@@ -17,9 +21,8 @@ Addresses the top failure modes found in error analysis of the naive labeler
 - Questions (3%): "will $LMT moon?" treated as neutral, not bullish.
 - Negation (1%): "NOT going to moon" correctly flips direction.
 
-Reuses keyword lists, emoji sets, _intensity_score, and
-compute_exaggeration_score from the naive labeler. Only parse_direction and
-label_claim are replaced.
+Reuses keyword lists, emoji sets, and _intensity_score from the naive labeler.
+Only parse_direction, label_claim, and exaggeration scoring are replaced.
 """
 
 import functools
@@ -36,7 +39,6 @@ from .labeler import (
     _DOWN_SIGNALS,
     _DOWN_EMOJI,
     _intensity_score,
-    compute_exaggeration_score,
 )
 from .models import RawClaim, LabeledClaim
 
@@ -282,6 +284,55 @@ def _score_with_negation(
 
 
 # ---------------------------------------------------------------------------
+# Exaggeration score (per-ticker scaling, no fixed thresholds)
+# ---------------------------------------------------------------------------
+
+def _compute_exaggeration_score_improved(
+    claimed: Literal["up", "down", "neutral"],
+    actual: Literal["up", "down", "neutral"],
+    price_change_pct: float | None,
+    has_catalyst: bool,
+    intensity: float,
+    threshold_pct: float,
+    *,
+    news_available: bool = True,
+) -> float:
+    """Compute exaggeration score using per-ticker scaling.
+
+    Same three components as the naive version, but the magnitude gap
+    scales relative to the ticker's volatility instead of a fixed 5%.
+    A move of 3x the ticker's median daily swing is "fully justified"
+    (magnitude gap = 0).
+    """
+    if price_change_pct is None:
+        return 0.5
+
+    abs_move = abs(price_change_pct)
+    max_justified = threshold_pct * 3  # 3x typical move = fully justified
+
+    # Component 1: Direction mismatch (0.0 or 0.5)
+    direction_score = 0.0
+    if claimed != "neutral" and actual != "neutral" and claimed != actual:
+        direction_score = 0.5
+
+    # Component 2: Magnitude gap (0.0 to 0.3)
+    magnitude_score = 0.0
+    if claimed != "neutral":
+        if direction_score > 0:
+            magnitude_score = intensity * 0.3
+        else:
+            move_ratio = min(abs_move / max_justified, 1.0)
+            magnitude_score = intensity * (1.0 - move_ratio) * 0.3
+
+    # Component 3: Catalyst gap (0.0 to 0.2)
+    catalyst_score = 0.0
+    if claimed != "neutral" and not has_catalyst and news_available:
+        catalyst_score = intensity * 0.2
+
+    return min(direction_score + magnitude_score + catalyst_score, 1.0)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -338,6 +389,15 @@ def label_claim_improved(raw: RawClaim) -> LabeledClaim:
 
     abs_move = abs(raw.price_change_pct) if raw.price_change_pct is not None else 0.0
 
+    # All thresholds derived from per-ticker volatility — no fixed numbers.
+    # threshold_pct = ticker's median absolute daily move in percentage points.
+    # A "significant move" is >= 1x the ticker's typical daily move.
+    # A "large move" is >= 3x (understated territory for neutral tweets).
+    # A "huge move" is >= 5x (understated even with some directional language).
+    understated_threshold = threshold_pct * 3
+    major_move_threshold = threshold_pct * 5
+    catalyst_threshold = threshold_pct * 2
+
     # Default label
     label: Literal["exaggerated", "accurate", "understated"] = "accurate"
 
@@ -345,33 +405,41 @@ def label_claim_improved(raw: RawClaim) -> LabeledClaim:
         label = "accurate" if claimed == "neutral" else "exaggerated"
 
     elif claimed == "neutral" and abs_move < threshold_pct:
+        # Neutral tweet, move within normal daily noise
         label = "accurate"
 
-    elif claimed == "neutral" and abs_move >= 5.0:
+    elif claimed == "neutral" and abs_move >= understated_threshold:
+        # Neutral tweet but move is 3x+ the typical daily swing
         label = "understated"
 
     elif claimed != "neutral" and actual != "neutral" and claimed != actual:
+        # Got the direction wrong
         label = "exaggerated"
 
     elif claimed != "neutral" and abs_move < threshold_pct:
+        # Directional claim but move is below the ticker's noise floor
         label = "exaggerated"
 
     elif (
         claimed != "neutral"
         and not raw.has_catalyst
         and raw.news_headlines
-        and abs_move < threshold_pct * 2
+        and abs_move < catalyst_threshold
     ):
+        # Directional claim, no catalyst found, move below 2x typical
         label = "exaggerated"
 
     elif claimed != "neutral" and claimed == actual and abs_move >= threshold_pct:
+        # Direction matches and move exceeds the ticker's noise floor
         label = "accurate"
 
-    elif abs_move >= 10.0 and intensity < 0.3:
+    elif abs_move >= major_move_threshold and intensity < 0.3:
+        # Huge move (5x+ typical) but calm language
         label = "understated"
 
-    exaggeration_score = compute_exaggeration_score(
+    exaggeration_score = _compute_exaggeration_score_improved(
         claimed, actual, raw.price_change_pct, raw.has_catalyst, intensity,
+        threshold_pct,
         news_available=bool(raw.news_headlines),
     )
 
