@@ -813,7 +813,7 @@ class SentinelDB:
                    r.posted_during_market_hours, r.volume_at_tweet,
                    l.label, l.claimed_direction, l.actual_direction,
                    l.exaggeration_score, l.news_summary, l.labeled_at,
-                   a.grifter_score
+                   a.{labels}_grifter_score AS grifter_score
             FROM {label_table} l
             JOIN raw_claims r ON r.tweet_id = l.tweet_id
             LEFT JOIN accounts a ON r.username = a.username
@@ -938,7 +938,7 @@ class SentinelDB:
         category: str = "grifters",
         labels: str = "naive",
         limit: int = 20,
-    ) -> list[dict]:
+    ) -> list[Account]:
         """Get account leaderboard by category.
 
         Args:
@@ -950,10 +950,7 @@ class SentinelDB:
 
         conn = self._get_conn()
         query = f"""
-            SELECT username, {prefix}_grifter_score as grifter_score,
-                   {prefix}_total_claims as total_claims,
-                   {prefix}_exaggerated_count as exaggerated_count,
-                   {prefix}_accurate_count as accurate_count
+            SELECT *
             FROM accounts
             WHERE {prefix}_grifter_score IS NOT NULL
               AND {prefix}_total_claims >= 5
@@ -966,7 +963,7 @@ class SentinelDB:
             columns = [desc[0] for desc in cur.description]
             rows = cur.fetchall()
 
-        return [dict(zip(columns, row)) for row in rows]
+        return [self._row_to_account(dict(zip(columns, row))) for row in rows]
 
     def get_unclassified_accounts(self, limit: int = 100) -> list[dict]:
         """Get accounts that haven't been bot-classified yet, with sample tweets."""

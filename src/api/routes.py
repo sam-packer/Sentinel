@@ -439,7 +439,7 @@ def leaderboard():
         account_list = db.get_leaderboard(category=category, limit=limit, labels=labels)
         return jsonify({
             "category": category,
-            "accounts": account_list,
+            "accounts": [_serialize_account(a) for a in account_list],
             "labels": labels,
         })
     except Exception as e:
