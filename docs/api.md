@@ -183,6 +183,41 @@ curl http://localhost:5000/api/accounts?account_type=bot
 curl http://localhost:5000/api/accounts?labels=improved&sort_by=improved_grifter_score
 ```
 
+Response:
+
+```json
+{
+  "accounts": [
+    {
+      "username": "hypetrader",
+      "is_bot": false,
+      "bot_reason": null,
+      "naive": {
+        "total_claims": 15,
+        "exaggerated_count": 10,
+        "accurate_count": 3,
+        "understated_count": 2,
+        "grifter_score": 0.67,
+        "grifter_category": "mostly_wrong"
+      },
+      "improved": {
+        "total_claims": 15,
+        "exaggerated_count": 8,
+        "accurate_count": 5,
+        "understated_count": 2,
+        "grifter_score": 0.53,
+        "grifter_category": "mostly_wrong"
+      },
+      "first_seen": "2026-01-15T12:00:00+00:00",
+      "last_seen": "2026-03-10T14:30:00+00:00",
+      "classified_at": "2026-02-01T08:00:00+00:00"
+    }
+  ],
+  "count": 1,
+  "labels": "naive"
+}
+```
+
 ## GET /api/accounts/:username
 
 Account detail with credibility metrics and claim history. The `labels` parameter controls which labeled claims are
@@ -240,7 +275,8 @@ Returns 404 if the ticker is not in the defense stock universe.
 
 ## GET /api/leaderboard
 
-Top accounts by credibility. Returns accounts with 5+ claims, excluding bots.
+Top accounts by credibility. Returns accounts with 5+ claims, excluding bots. Each account includes the full
+naive and improved score breakdown (same structure as `/api/accounts`).
 
 Query parameters:
 
