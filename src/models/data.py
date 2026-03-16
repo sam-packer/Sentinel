@@ -38,7 +38,7 @@ def load_labeled_claims(db: SentinelDB) -> list[dict]:
     """Load all labeled claims from the database.
 
     Returns a list of dicts with 'text' and 'label' keys (plus all
-    other fields from the joined raw_claims/labeled_claims tables).
+    other fields from the joined raw_claims/naive_labeled_claims tables).
     """
     query = """
         SELECT r.tweet_id, r.text, r.username, r.created_at,
@@ -46,7 +46,7 @@ def load_labeled_claims(db: SentinelDB) -> list[dict]:
                r.has_catalyst, r.catalyst_type,
                l.label, l.claimed_direction, l.actual_direction,
                l.exaggeration_score
-        FROM labeled_claims l
+        FROM naive_labeled_claims l
         JOIN raw_claims r ON r.tweet_id = l.tweet_id
         LEFT JOIN accounts a ON r.username = a.username
         WHERE (a.account_type IS NULL OR a.account_type = 'human')

@@ -57,7 +57,7 @@ def main():
             _, tweet_rows = db.execute_query("""
                 SELECT r.text, l.label, l.claimed_direction, r.price_change_pct
                 FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE r.username = %s
                 ORDER BY r.created_at DESC LIMIT 3
             """, [username])
@@ -101,7 +101,7 @@ def main():
                 SELECT r.text, l.label, l.claimed_direction, r.price_change_pct,
                        r.has_catalyst, r.catalyst_type
                 FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE r.username = %s AND l.label = 'exaggerated'
                 ORDER BY r.created_at DESC LIMIT 3
             """, [username])
@@ -145,7 +145,7 @@ def main():
             _, tweet_rows = db.execute_query("""
                 SELECT r.text, l.claimed_direction, r.price_change_pct
                 FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE r.username = %s
                 ORDER BY r.created_at DESC LIMIT 3
             """, [username])

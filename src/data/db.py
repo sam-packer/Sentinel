@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS raw_claims (
     scraped_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS labeled_claims (
+CREATE TABLE IF NOT EXISTS naive_labeled_claims (
     tweet_id BIGINT PRIMARY KEY REFERENCES raw_claims(tweet_id),
     label VARCHAR(20) NOT NULL,
     claimed_direction VARCHAR(10) NOT NULL,
@@ -54,8 +54,21 @@ CREATE TABLE IF NOT EXISTS labeled_claims (
     labeled_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_labeled_claims_label ON labeled_claims(label);
-CREATE INDEX IF NOT EXISTS idx_labeled_claims_labeled_at ON labeled_claims(labeled_at DESC);
+CREATE INDEX IF NOT EXISTS idx_naive_labeled_claims_label ON naive_labeled_claims(label);
+CREATE INDEX IF NOT EXISTS idx_naive_labeled_claims_labeled_at ON naive_labeled_claims(labeled_at DESC);
+
+CREATE TABLE IF NOT EXISTS improved_labeled_claims (
+    tweet_id BIGINT PRIMARY KEY REFERENCES raw_claims(tweet_id),
+    label VARCHAR(20) NOT NULL,
+    claimed_direction VARCHAR(10) NOT NULL,
+    actual_direction VARCHAR(10) NOT NULL,
+    exaggeration_score DOUBLE PRECISION NOT NULL,
+    news_summary TEXT DEFAULT '',
+    labeled_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_improved_labeled_claims_label ON improved_labeled_claims(label);
+CREATE INDEX IF NOT EXISTS idx_improved_labeled_claims_labeled_at ON improved_labeled_claims(labeled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_raw_claims_ticker ON raw_claims(ticker);
 CREATE INDEX IF NOT EXISTS idx_raw_claims_created_at ON raw_claims(created_at DESC);
 
@@ -159,7 +172,7 @@ class SentinelDB:
             tickers: Only return claims for these tickers. None = all.
             since: Only return claims created after this time.
             until: Only return claims created before this time.
-            unlabeled_only: If True, only return claims without a labeled_claims row.
+            unlabeled_only: If True, only return claims without a naive_labeled_claims row.
         """
         conn = self._get_conn()
         query = "SELECT * FROM raw_claims"
@@ -168,7 +181,7 @@ class SentinelDB:
 
         if unlabeled_only:
             conditions.append(
-                "tweet_id NOT IN (SELECT tweet_id FROM labeled_claims)"
+                "tweet_id NOT IN (SELECT tweet_id FROM naive_labeled_claims)"
             )
         if tickers:
             conditions.append("ticker = ANY(%s)")
@@ -294,7 +307,7 @@ class SentinelDB:
             # Upsert the label
             cur.execute(
                 """
-                INSERT INTO labeled_claims
+                INSERT INTO naive_labeled_claims
                     (tweet_id, label, claimed_direction, actual_direction,
                      exaggeration_score, news_summary)
                 VALUES (%s, %s, %s, %s, %s, %s)
@@ -340,7 +353,7 @@ class SentinelDB:
                    r.posted_during_market_hours, r.volume_at_tweet,
                    l.label, l.claimed_direction, l.actual_direction,
                    l.exaggeration_score, l.news_summary, l.labeled_at
-            FROM labeled_claims l
+            FROM naive_labeled_claims l
             JOIN raw_claims r ON r.tweet_id = l.tweet_id
         """
         params: list = []
@@ -382,14 +395,14 @@ class SentinelDB:
             # Total claims
             cur.execute(f"""
                 SELECT COUNT(*) FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE {FRESHNESS_FILTER}
             """)
             stats["total_claims"] = cur.fetchone()[0]
 
             # Label distribution
             cur.execute(f"""
-                SELECT l.label, COUNT(*) FROM labeled_claims l
+                SELECT l.label, COUNT(*) FROM naive_labeled_claims l
                 JOIN raw_claims r ON r.tweet_id = l.tweet_id
                 WHERE {FRESHNESS_FILTER}
                 GROUP BY l.label
@@ -400,7 +413,7 @@ class SentinelDB:
             cur.execute(f"""
                 SELECT r.catalyst_type, COUNT(*)
                 FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE r.catalyst_type IS NOT NULL AND {FRESHNESS_FILTER}
                 GROUP BY r.catalyst_type
             """)
@@ -410,7 +423,7 @@ class SentinelDB:
             cur.execute(f"""
                 SELECT r.ticker, COUNT(*) as cnt
                 FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE {FRESHNESS_FILTER}
                 GROUP BY r.ticker ORDER BY cnt DESC LIMIT 10
             """)
@@ -422,7 +435,7 @@ class SentinelDB:
             cur.execute(f"""
                 SELECT r.username, COUNT(*) as cnt
                 FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE l.label = 'exaggerated' AND {FRESHNESS_FILTER}
                 GROUP BY r.username ORDER BY cnt DESC LIMIT 10
             """)
@@ -438,7 +451,7 @@ class SentinelDB:
                        SUM(CASE WHEN l.label = 'exaggerated' THEN 1 ELSE 0 END) as exaggerated,
                        SUM(CASE WHEN l.label = 'understated' THEN 1 ELSE 0 END) as understated
                 FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE {FRESHNESS_FILTER}
                 GROUP BY r.ticker ORDER BY total DESC
             """)
@@ -457,7 +470,7 @@ class SentinelDB:
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT tweet_id FROM labeled_claims ORDER BY labeled_at DESC LIMIT 1"
+                "SELECT tweet_id FROM naive_labeled_claims ORDER BY labeled_at DESC LIMIT 1"
             )
             row = cur.fetchone()
             return row[0] if row else None
@@ -474,10 +487,10 @@ class SentinelDB:
                    r.posted_during_market_hours, r.volume_at_tweet,
                    l.label, l.claimed_direction, l.actual_direction,
                    l.exaggeration_score, l.news_summary, l.labeled_at
-            FROM labeled_claims l
+            FROM naive_labeled_claims l
             JOIN raw_claims r ON r.tweet_id = l.tweet_id
             WHERE l.labeled_at > (
-                SELECT labeled_at FROM labeled_claims WHERE tweet_id = %s
+                SELECT labeled_at FROM naive_labeled_claims WHERE tweet_id = %s
             )
             ORDER BY l.labeled_at ASC
         """
@@ -620,7 +633,7 @@ class SentinelDB:
                     MIN(r.created_at) as first_seen,
                     MAX(r.created_at) as last_seen
                 FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE r.username = %s
                 """,
                 (username,),
@@ -675,7 +688,7 @@ class SentinelDB:
                    r.posted_during_market_hours, r.volume_at_tweet,
                    l.label, l.claimed_direction, l.actual_direction,
                    l.exaggeration_score, l.news_summary, l.labeled_at
-            FROM labeled_claims l
+            FROM naive_labeled_claims l
             JOIN raw_claims r ON r.tweet_id = l.tweet_id
             WHERE r.username = %s
             ORDER BY l.labeled_at DESC
@@ -718,7 +731,7 @@ class SentinelDB:
                    l.label, l.claimed_direction, l.actual_direction,
                    l.exaggeration_score, l.news_summary, l.labeled_at,
                    a.grifter_score
-            FROM labeled_claims l
+            FROM naive_labeled_claims l
             JOIN raw_claims r ON r.tweet_id = l.tweet_id
             LEFT JOIN accounts a ON r.username = a.username
             WHERE r.ticker = %s AND {FRESHNESS_FILTER}
@@ -761,7 +774,7 @@ class SentinelDB:
                        SUM(CASE WHEN l.label = 'accurate' THEN 1 ELSE 0 END) as accurate,
                        SUM(CASE WHEN l.label = 'understated' THEN 1 ELSE 0 END) as understated
                 FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE r.ticker = %s AND {FRESHNESS_FILTER}
                 """,
                 (ticker,),
@@ -784,7 +797,7 @@ class SentinelDB:
                 f"""
                 SELECT r.catalyst_type, COUNT(*) as cnt
                 FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE r.ticker = %s AND r.catalyst_type IS NOT NULL
                   AND {FRESHNESS_FILTER}
                 GROUP BY r.catalyst_type
@@ -802,7 +815,7 @@ class SentinelDB:
                 f"""
                 SELECT AVG(r.price_change_pct)
                 FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE r.ticker = %s AND r.price_change_pct IS NOT NULL
                   AND {FRESHNESS_FILTER}
                 """,
@@ -816,7 +829,7 @@ class SentinelDB:
                 f"""
                 SELECT r.username, COUNT(*) as cnt
                 FROM raw_claims r
-                JOIN labeled_claims l ON r.tweet_id = l.tweet_id
+                JOIN naive_labeled_claims l ON r.tweet_id = l.tweet_id
                 WHERE r.ticker = %s AND {FRESHNESS_FILTER}
                 GROUP BY r.username
                 ORDER BY cnt DESC
