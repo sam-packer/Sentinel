@@ -506,6 +506,124 @@ class SentinelDB(AccountMixin):
                 for row in cur.fetchall()
             ]
 
+            # --- Account stats ---
+            score_col = f"{labels}_grifter_score"
+            total_col = f"{labels}_total_claims"
+
+            cur.execute("SELECT COUNT(*) FROM accounts")
+            stats["total_accounts"] = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT account_type, COUNT(*) FROM accounts GROUP BY account_type
+            """)
+            stats["account_type_breakdown"] = dict(cur.fetchall())
+
+            cur.execute(f"""
+                SELECT COUNT(*) FROM accounts WHERE {score_col} IS NOT NULL
+            """)
+            stats["accounts_with_score"] = cur.fetchone()[0]
+
+            cur.execute(f"""
+                SELECT ROUND(AVG({score_col})::numeric, 4)
+                FROM accounts WHERE {score_col} IS NOT NULL
+            """)
+            stats["avg_grifter_score"] = float(cur.fetchone()[0] or 0)
+
+            cur.execute(f"""
+                SELECT username, {score_col}, {total_col}
+                FROM accounts
+                WHERE {score_col} IS NOT NULL AND account_type = 'human'
+                ORDER BY {score_col} DESC LIMIT 10
+            """)
+            stats["top_grifters"] = [
+                {"username": row[0], "grifter_score": float(row[1]), "total_claims": row[2]}
+                for row in cur.fetchall()
+            ]
+
+            cur.execute(f"""
+                SELECT
+                    SUM({labels}_exaggerated_count),
+                    SUM({labels}_accurate_count),
+                    SUM({labels}_understated_count)
+                FROM accounts WHERE account_type = 'human'
+            """)
+            row = cur.fetchone()
+            stats["human_account_label_totals"] = {
+                "exaggerated": int(row[0] or 0),
+                "accurate": int(row[1] or 0),
+                "understated": int(row[2] or 0),
+            }
+
+            # --- Engagement by label ---
+            cur.execute(f"""
+                SELECT l.label,
+                       ROUND(AVG(r.likes)::numeric, 1) as avg_likes,
+                       ROUND(AVG(r.retweets)::numeric, 1) as avg_retweets,
+                       ROUND(AVG(r.views)::numeric, 1) as avg_views
+                FROM raw_claims r
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
+                WHERE {FRESHNESS_FILTER}
+                GROUP BY l.label
+            """)
+            stats["avg_engagement_by_label"] = {
+                row[0]: {"avg_likes": float(row[1] or 0), "avg_retweets": float(row[2] or 0), "avg_views": float(row[3] or 0)}
+                for row in cur.fetchall()
+            }
+
+            # --- Price change by label ---
+            cur.execute(f"""
+                SELECT l.label,
+                       ROUND(AVG(r.price_change_pct)::numeric, 4) as avg_pct,
+                       ROUND(MIN(r.price_change_pct)::numeric, 4) as min_pct,
+                       ROUND(MAX(r.price_change_pct)::numeric, 4) as max_pct
+                FROM raw_claims r
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
+                WHERE r.price_change_pct IS NOT NULL AND {FRESHNESS_FILTER}
+                GROUP BY l.label
+            """)
+            stats["price_change_by_label"] = {
+                row[0]: {"avg": float(row[1] or 0), "min": float(row[2] or 0), "max": float(row[3] or 0)}
+                for row in cur.fetchall()
+            }
+
+            # --- Direction accuracy ---
+            cur.execute(f"""
+                SELECT l.claimed_direction, l.actual_direction, COUNT(*) as cnt
+                FROM {label_table} l
+                JOIN raw_claims r ON r.tweet_id = l.tweet_id
+                WHERE {FRESHNESS_FILTER}
+                GROUP BY l.claimed_direction, l.actual_direction
+            """)
+            stats["direction_confusion"] = [
+                {"claimed": row[0], "actual": row[1], "count": row[2]}
+                for row in cur.fetchall()
+            ]
+
+            # --- Market hours breakdown ---
+            cur.execute(f"""
+                SELECT r.posted_during_market_hours, COUNT(*) as cnt
+                FROM raw_claims r
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
+                WHERE r.posted_during_market_hours IS NOT NULL AND {FRESHNESS_FILTER}
+                GROUP BY r.posted_during_market_hours
+            """)
+            rows = cur.fetchall()
+            stats["market_hours_breakdown"] = {
+                ("during_market" if row[0] else "after_hours"): row[1] for row in rows
+            }
+
+            # --- Avg exaggeration score by label ---
+            cur.execute(f"""
+                SELECT l.label, ROUND(AVG(l.exaggeration_score)::numeric, 4)
+                FROM {label_table} l
+                JOIN raw_claims r ON r.tweet_id = l.tweet_id
+                WHERE {FRESHNESS_FILTER}
+                GROUP BY l.label
+            """)
+            stats["avg_exaggeration_score_by_label"] = {
+                row[0]: float(row[1] or 0) for row in cur.fetchall()
+            }
+
         return stats
 
     def get_stock_feed(
