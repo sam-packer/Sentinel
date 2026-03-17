@@ -27,7 +27,8 @@ try:
     from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 except ImportError as exc:
     raise ImportError(
-        "PyTorch and transformers are required for the neural model"
+        "PyTorch and transformers are required for the neural model. "
+        "Install with: uv sync --extra neural"
     ) from exc
 from sklearn.metrics import f1_score
 from sklearn.model_selection import StratifiedKFold
