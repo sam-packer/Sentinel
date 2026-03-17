@@ -506,6 +506,120 @@ class SentinelDB(AccountMixin):
 
         return stats
 
+    def get_stock_feed(
+        self,
+        ticker: str,
+        limit: int = 50,
+        offset: int = 0,
+        exclude_bots: bool = True,
+        labels: str = "naive",
+    ) -> list[dict]:
+        """Get paginated labeled claims for a specific ticker.
+
+        Args:
+            ticker: Stock ticker to filter by.
+            limit: Max results.
+            offset: Pagination offset.
+            exclude_bots: Whether to exclude bot/garbage accounts.
+            labels: Which label set to query ("naive" or "improved").
+        """
+        label_table = _label_table(labels)
+        conn = self._get_conn()
+        query = f"""
+            SELECT r.tweet_id, r.text, r.username, r.created_at,
+                   r.likes, r.retweets, r.replies, r.views, r.hashtags,
+                   r.ticker, r.company_name,
+                   r.price_at_tweet, r.price_24h_later, r.price_change_pct,
+                   r.news_headlines, r.has_catalyst, r.catalyst_type,
+                   r.posted_during_market_hours, r.volume_at_tweet,
+                   l.label, l.claimed_direction, l.actual_direction,
+                   l.exaggeration_score, l.news_summary, l.labeled_at
+            FROM {label_table} l
+            JOIN raw_claims r ON r.tweet_id = l.tweet_id
+        """
+        conditions = [FRESHNESS_FILTER, "r.ticker = %s"]
+        params: list = [ticker]
+
+        if exclude_bots:
+            conditions.append(
+                "r.username NOT IN (SELECT username FROM accounts WHERE account_type != 'human')"
+            )
+
+        query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY r.created_at DESC LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
+
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+
+        results = []
+        for row in rows:
+            d = dict(zip(columns, row))
+            if isinstance(d.get("news_headlines"), str):
+                d["news_headlines"] = json.loads(d["news_headlines"])
+            if isinstance(d.get("hashtags"), str):
+                d["hashtags"] = json.loads(d["hashtags"])
+            for key in ("created_at", "labeled_at"):
+                if isinstance(d.get(key), datetime):
+                    d[key] = d[key].isoformat()
+            results.append(d)
+
+        return results
+
+    def get_stock_stats(self, ticker: str, labels: str = "naive") -> dict:
+        """Get aggregate statistics for a specific ticker.
+
+        Args:
+            ticker: Stock ticker to get stats for.
+            labels: Which label set to query ("naive" or "improved").
+        """
+        label_table = _label_table(labels)
+        conn = self._get_conn()
+        stats: dict = {}
+
+        with conn.cursor() as cur:
+            # Total claims for this ticker
+            cur.execute(f"""
+                SELECT COUNT(*) FROM raw_claims r
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
+                WHERE r.ticker = %s AND {FRESHNESS_FILTER}
+            """, (ticker,))
+            stats["total_claims"] = cur.fetchone()[0]
+
+            # Label distribution
+            cur.execute(f"""
+                SELECT l.label, COUNT(*) FROM {label_table} l
+                JOIN raw_claims r ON r.tweet_id = l.tweet_id
+                WHERE r.ticker = %s AND {FRESHNESS_FILTER}
+                GROUP BY l.label
+            """, (ticker,))
+            stats["label_distribution"] = dict(cur.fetchall())
+
+            # Average exaggeration score
+            cur.execute(f"""
+                SELECT AVG(l.exaggeration_score) FROM {label_table} l
+                JOIN raw_claims r ON r.tweet_id = l.tweet_id
+                WHERE r.ticker = %s AND {FRESHNESS_FILTER}
+            """, (ticker,))
+            avg = cur.fetchone()[0]
+            stats["avg_exaggeration_score"] = float(avg) if avg is not None else None
+
+            # Top claimants for this ticker
+            cur.execute(f"""
+                SELECT r.username, COUNT(*) as cnt
+                FROM raw_claims r
+                JOIN {label_table} l ON r.tweet_id = l.tweet_id
+                WHERE r.ticker = %s AND {FRESHNESS_FILTER}
+                GROUP BY r.username ORDER BY cnt DESC LIMIT 10
+            """, (ticker,))
+            stats["top_claimants"] = [
+                {"username": row[0], "count": row[1]} for row in cur.fetchall()
+            ]
+
+        return stats
+
     def get_latest_claim_id(self, labels: str = "naive") -> int | None:
         """Get the tweet_id of the most recently labeled claim (for SSE polling).
 
