@@ -1,3 +1,5 @@
+# This file was developed with the assistance of Claude Code and Opus 4.6.
+
 """
 Bot detection using LLM-as-judge (Claude).
 

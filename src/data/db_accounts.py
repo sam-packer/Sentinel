@@ -1,3 +1,5 @@
+# This file was developed with the assistance of Claude Code and Opus 4.6.
+
 """Account query methods for SentinelDB.
 
 Extracted as a mixin to keep the main db.py under the pylint

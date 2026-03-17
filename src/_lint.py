@@ -1,3 +1,5 @@
+# This file was developed with the assistance of Claude Code and Opus 4.6.
+
 """Wrapper so `uv run lint` lints the entire project with no extra args."""
 
 import sys
